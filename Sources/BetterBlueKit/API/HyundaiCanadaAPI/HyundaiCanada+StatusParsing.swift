@@ -317,7 +317,7 @@ extension HyundaiCanadaAPIClient {
         return nil
     }
 
-    private func stringify(_ value: Any?) -> String? {
+    func stringify(_ value: Any?) -> String? {
         if let str = value as? String { return str }
         if let num = value as? NSNumber { return num.stringValue }
         return nil
