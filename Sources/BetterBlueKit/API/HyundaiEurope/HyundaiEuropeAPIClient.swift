@@ -287,6 +287,11 @@ public final class HyundaiEuropeAPIClient: APIClientBase, APIClientProtocol {
     // MARK: - Commands
 
     public func sendCommand(for vehicle: Vehicle, command: VehicleCommand, authToken: AuthToken) async throws {
+        switch command {
+        case .flashLights, .honkAndFlash:
+            throw APIError(message: "Horn/lights command not supported for Hyundai Europe", apiName: apiName)
+        default: break
+        }
         let (path, body) = commandPathAndBody(for: command)
         let url = "\(baseURL)/api/v2/spa/vehicles/\(vehicle.regId)/\(path)"
 

@@ -20,6 +20,7 @@ extension HyundaiUSAAPIClient {
         case .startCharge: "ac/v2/evc/charge/start"
         case .stopCharge: "ac/v2/evc/charge/stop"
         case .setTargetSOC: "ac/v2/evc/charge/targetsoc/set"
+        case .flashLights, .honkAndFlash: ""
         }
         return "\(baseURL)/\(path)"
     }

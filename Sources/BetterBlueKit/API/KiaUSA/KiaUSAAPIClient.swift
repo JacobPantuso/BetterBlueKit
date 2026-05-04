@@ -295,6 +295,11 @@ public final class KiaUSAAPIClient: APIClientBase, APIClientProtocol {
     }
 
     public func sendCommand(for vehicle: Vehicle, command: VehicleCommand, authToken: AuthToken) async throws {
+        switch command {
+        case .flashLights, .honkAndFlash:
+            throw APIError(message: "Horn/lights command not supported for Kia USA", apiName: apiName)
+        default: break
+        }
         let url = commandURL(for: command)
         let body = commandBody(for: command, vehicle: vehicle)
         let method = commandMethod(for: command)

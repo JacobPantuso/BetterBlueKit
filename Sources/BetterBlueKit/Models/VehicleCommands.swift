@@ -13,6 +13,8 @@ public enum VehicleCommand: Sendable {
     case lock, unlock, startClimate(ClimateOptions)
     case stopClimate, startCharge, stopCharge
     case setTargetSOC(acLevel: Int, dcLevel: Int)
+    case flashLights
+    case honkAndFlash
 }
 
 public struct ClimateOptions: Codable, Equatable, Sendable {

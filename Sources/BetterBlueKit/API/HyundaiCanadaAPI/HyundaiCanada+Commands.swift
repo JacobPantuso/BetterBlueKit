@@ -29,6 +29,8 @@ extension HyundaiCanadaAPIClient {
             return "evc/rcstp"
         case .setTargetSOC:
             return "evc/setsoc"
+        case .flashLights, .honkAndFlash:
+            return "hrnlght"
         }
     }
 
@@ -62,6 +64,12 @@ extension HyundaiCanadaAPIClient {
 
         case .stopClimate, .startCharge, .stopCharge, .lock, .unlock:
             return ["pin": pin]
+
+        case .flashLights:
+            return ["pin": pin, "horn": "false"]
+
+        case .honkAndFlash:
+            return ["pin": pin, "horn": "true"]
 
         case .setTargetSOC(let acLevel, let dcLevel):
             return [

@@ -29,6 +29,7 @@ extension KiaUSAAPIClient {
         case .startCharge: "evc/charge"
         case .stopCharge: "evc/cancel"
         case .setTargetSOC: "evc/charge/targetsoc/set"
+        case .flashLights, .honkAndFlash: ""
         }
         return "\(apiURL)\(path)"
     }

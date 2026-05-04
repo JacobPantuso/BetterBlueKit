@@ -43,6 +43,8 @@ extension HyundaiEuropeAPIClient {
                     ["targetSOClevel": dcLevel, "plugType": 1]
                 ]
             ])
+        case .flashLights, .honkAndFlash:
+            return ("", [:])
         }
     }
 }
