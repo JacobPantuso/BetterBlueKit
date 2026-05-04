@@ -53,7 +53,7 @@ public struct Temperature: Codable, Hashable, Sendable {
     public enum Units: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
         case celsius, fahrenheit
 
-        public init(_ number: Int?) { self = number == 1 ? .fahrenheit : .celsius }
+        public init(_ number: Int?) { self = number == 0 ? .fahrenheit : .celsius }
 
         public func integer() -> Int { self == .fahrenheit ? 1 : 0 }
         public var id: String { rawValue }

@@ -49,6 +49,17 @@ extension HyundaiCanadaAPIClient {
         return result
     }
 
+    func commandStatusHeaders(
+        authToken: AuthToken,
+        vehicleId: String,
+        pAuth: String,
+        transactionId: String
+    ) -> [String: String] {
+        var result = authorizedHeaders(authToken: authToken, vehicleId: vehicleId, pAuth: pAuth)
+        result["TransactionId"] = transactionId
+        return result
+    }
+
     // MARK: - Cloudflare Cookie
 
     func fetchCloudFlareCookie() async throws -> String {

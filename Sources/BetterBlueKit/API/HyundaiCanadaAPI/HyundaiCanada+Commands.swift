@@ -9,6 +9,10 @@ import Foundation
 
 extension HyundaiCanadaAPIClient {
 
+    func extractTransactionId(from headers: [String: String]) -> String? {
+        headers.first { $0.key.lowercased() == "transactionid" }?.value
+    }
+
     func commandPath(for command: VehicleCommand) -> String {
         switch command {
         case .lock:

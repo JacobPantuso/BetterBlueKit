@@ -18,6 +18,9 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
     let clientSecret = "CLISCR01AHSPA"
     let userAgent = "MyHyundai/2.0.25 (iPhone; iOS 18.3; Scale/3.00)"
 
+    private let maxCommandPollAttempts = 30
+    let commandPollIntervalNanoseconds: UInt64 = 2_000_000_000
+
     let deviceId = UUID().uuidString.uppercased()
 
     let hvacFahrenheitValues: [Double] = Array(62...82).map { Double($0) }
@@ -185,6 +188,61 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
         nil
     }
 
+    public func fetchSurroundView(for vehicle: Vehicle, authToken: AuthToken, cached: Bool = true) async throws -> SVMResult {
+        _ = try await ensureCloudFlareCookie()
+
+        if !cached {
+            let authCode = try await fetchCommandAuthCode(authToken: authToken)
+
+            let (data, _, response) = try await performJSONRequest(
+                url: "\(apiBaseURL)/rfc/fndmcrsvm",
+                method: .POST,
+                headers: authorizedHeaders(authToken: authToken, vehicleId: vehicle.regId, pAuth: authCode),
+                body: ["vehicleId": vehicle.regId],
+                requestType: .sendCommand
+            )
+
+            try validateCommandResponse(data, context: "surround view request")
+
+            let responseHeaders = extractResponseHeaders(from: response)
+            guard let transactionId = extractTransactionId(from: responseHeaders) else {
+                throw APIError.logError("Canada SVM missing TransactionId header", apiName: apiName)
+            }
+
+            // Poll for completion — wait 10s before first poll since SVM capture takes ~2 minutes.
+            // On timeout, log and fall through to fetch whatever result exists rather than failing hard.
+            do {
+                try await pollForCommandCompletion(
+                    vehicle: vehicle,
+                    authToken: authToken,
+                    authCode: authCode,
+                    transactionId: transactionId,
+                    initialDelayNanoseconds: 10_000_000_000
+                )
+            } catch {
+                BBLogger.debug(.api, "HyundaiCanada: SVM poll ended early, attempting to fetch last result anyway: \(error)")
+            }
+        }
+
+        let (imgData, _, _) = try await performJSONRequest(
+            url: "\(apiBaseURL)/rfc/lastmcrsvm",
+            method: .POST,
+            headers: authorizedHeaders(authToken: authToken, vehicleId: vehicle.regId),
+            body: ["vehicleId": vehicle.regId],
+            requestType: .fetchVehicleStatus
+        )
+
+        return try parseSurroundViewResponse(imgData)
+    }
+
+    private func parseSurroundViewResponse(_ data: Data) throws -> SVMResult {
+        let response = try JSONDecoder().decode(SVMResponse.self, from: data)
+        guard let result = response.result else {
+            throw APIError.serverError("Invalid surround view response format", apiName: apiName)
+        }
+        return result
+    }
+
     // MARK: - Command Flow
 
     private func fetchCommandAuthCode(authToken: AuthToken) async throws -> String {
@@ -253,6 +311,53 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
         )
 
         try validateCommandResponse(data, context: "command")
+    }
+
+    private func pollForCommandCompletion(
+        vehicle: Vehicle,
+        authToken: AuthToken,
+        authCode: String,
+        transactionId: String,
+        initialDelayNanoseconds: UInt64 = 0
+    ) async throws {
+        if initialDelayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: initialDelayNanoseconds)
+        }
+
+        var attempts = 0
+        var lastKnownResult = "unknown"
+
+        while attempts <= maxCommandPollAttempts {
+            let (data, _, _) = try await performJSONRequest(
+                url: "\(apiBaseURL)/rmtsts",
+                method: .POST,
+                headers: commandStatusHeaders(
+                    authToken: authToken,
+                    vehicleId: vehicle.regId,
+                    pAuth: authCode,
+                    transactionId: transactionId
+                ),
+                requestType: .sendCommand
+            )
+
+            let pollResult = try commandPollResult(data)
+            lastKnownResult = pollResult
+
+            if isSuccessfulPollResult(pollResult) {
+                return
+            }
+            if isFailedPollResult(pollResult) {
+                throw APIError.logError("Canada command failed (\(pollResult))", apiName: apiName)
+            }
+
+            attempts += 1
+            try await Task.sleep(nanoseconds: commandPollIntervalNanoseconds)
+        }
+
+        throw APIError.logError(
+            "Canada command completion polling timed out (last result: \(lastKnownResult))",
+            apiName: apiName
+        )
     }
 
     private func ensureCloudFlareCookie() async throws -> String {

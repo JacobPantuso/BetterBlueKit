@@ -108,6 +108,12 @@ extension HyundaiCanadaAPIClient {
         let sleepMode = statusData["sleepModeCheck"] as? Bool
         let washerFluid = parseBoolOrInt(statusData["washerFluidStatus"])
 
+        let smartKeyBatteryWarning: Bool? = {
+            if let boolValue = statusData["smartKeyBatteryWarning"] as? Bool { return boolValue }
+            if let intValue: Int = extractNumber(from: statusData["smartKeyBatteryWarning"]) { return intValue != 0 }
+            return nil
+        }()
+
         return VehicleStatus(
             vin: vehicle.vin,
             gasRange: parseCanadaGasRange(from: statusData, vehicle: vehicle),
@@ -127,7 +133,8 @@ extension HyundaiCanadaAPIClient {
             remoteIgnition: remoteIgnition,
             transmissionCondition: transmissionCondition,
             sleepMode: sleepMode,
-            washerFluidLow: washerFluid
+            washerFluidLow: washerFluid,
+            smartKeyBatteryWarning: smartKeyBatteryWarning
         )
     }
 
@@ -142,6 +149,41 @@ extension HyundaiCanadaAPIClient {
             throw APIError.logError("Invalid Canada command auth response", apiName: apiName)
         }
         return authCode
+    }
+
+    func commandPollResult(_ data: Data) throws -> String {
+        let json = try parseCanadaResponse(data, context: "command status")
+        guard let result = json["result"] as? [String: Any] else {
+            throw APIError.logError("Invalid command status response", apiName: apiName)
+        }
+
+        let transaction = result["transaction"] as? [String: Any] ?? [:]
+        let rawResult =
+            transaction["apiResult"] ??
+            result["apiResult"] ??
+            transaction["result"] ??
+            result["status"]
+
+        if let resultString = stringify(rawResult)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased(),
+           !resultString.isEmpty {
+            return resultString
+        }
+
+        if result["vehicle"] != nil {
+            return "C"
+        }
+
+        throw APIError.logError("Invalid command status response", apiName: apiName)
+    }
+
+    func isSuccessfulPollResult(_ result: String) -> Bool {
+        ["C", "S", "SUCCESS", "COMPLETE", "COMPLETED"].contains(result)
+    }
+
+    func isFailedPollResult(_ result: String) -> Bool {
+        ["F", "E", "FAILED", "ERROR"].contains(result)
     }
 
     func parseCanadaLocationResponse(_ data: Data) throws -> VehicleStatus.Location {

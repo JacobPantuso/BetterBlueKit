@@ -124,6 +124,7 @@ public struct VehicleStatus: Codable, Hashable, Sendable {
     public var transmissionCondition: Bool?
     public var sleepMode: Bool?
     public var washerFluidLow: Bool?
+    public var smartKeyBatteryWarning: Bool?
 
     public struct DoorStatus: Codable, Hashable, Sendable {
         public var frontLeft: Bool
@@ -185,14 +186,15 @@ public struct VehicleStatus: Codable, Hashable, Sendable {
                 tirePressureWarning: TirePressureWarning? = nil,
                 engineOn: Bool? = nil, accessoryOn: Bool? = nil,
                 remoteIgnition: Bool? = nil, transmissionCondition: Bool? = nil,
-                sleepMode: Bool? = nil, washerFluidLow: Bool? = nil) {
+                sleepMode: Bool? = nil, washerFluidLow: Bool? = nil, smartKeyBatteryWarning: Bool? = nil) {
         (self.vin, self.gasRange, self.evStatus, self.location) = (vin, gasRange, evStatus, location)
         (self.lockStatus, self.climateStatus, self.odometer, self.syncDate) =
             (lockStatus, climateStatus, odometer, syncDate)
         (self.battery12V, self.doorOpen, self.trunkOpen, self.hoodOpen, self.tirePressureWarning,
          self.engineOn, self.accessoryOn, self.remoteIgnition, self.transmissionCondition,
-         self.sleepMode, self.washerFluidLow) =
+         self.sleepMode, self.washerFluidLow, self.smartKeyBatteryWarning) =
             (battery12V, doorOpen, trunkOpen, hoodOpen, tirePressureWarning,
-             engineOn, accessoryOn, remoteIgnition, transmissionCondition, sleepMode, washerFluidLow)
+             engineOn, accessoryOn, remoteIgnition, transmissionCondition, sleepMode, washerFluidLow,
+             smartKeyBatteryWarning)
     }
 }
