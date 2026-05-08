@@ -15,10 +15,25 @@ public struct Vehicle: Codable, Identifiable, Equatable, Sendable {
     public var accountId: UUID, fuelType: FuelType
     public var generation: Int, odometer: Distance, vehicleKey: String?
 
+    // Optional fields populated from the vehicle list endpoint
+    public var trim: String?
+    public var preConditioningOption: Int?  // 1 = supported
+    public var mileageForNextService: Double?  // km
+    public var nextServiceDate: String?  // "YYYYMMDD" format
+    public var webManualUrl: String?
+
     public init(vin: String, regId: String, model: String, accountId: UUID,
-                fuelType: FuelType, generation: Int, odometer: Distance, vehicleKey: String? = nil) {
+                fuelType: FuelType, generation: Int, odometer: Distance, vehicleKey: String? = nil,
+                trim: String? = nil, preConditioningOption: Int? = nil,
+                mileageForNextService: Double? = nil, nextServiceDate: String? = nil,
+                webManualUrl: String? = nil) {
         (self.vin, self.regId, self.model, self.accountId) = (vin, regId, model, accountId)
         (self.fuelType, self.generation, self.odometer, self.vehicleKey) =
             (fuelType, generation, odometer, vehicleKey)
+        self.trim = trim
+        self.preConditioningOption = preConditioningOption
+        self.mileageForNextService = mileageForNextService
+        self.nextServiceDate = nextServiceDate
+        self.webManualUrl = webManualUrl
     }
 }

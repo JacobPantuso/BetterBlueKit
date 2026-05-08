@@ -62,6 +62,12 @@ extension HyundaiCanadaAPIClient {
 
             let fuelType = detectFuelType(from: vehicleData)
 
+            let trim = vehicleData["trim"] as? String
+            let preConditioningOption: Int? = extractNumber(from: vehicleData["preConditioningOption"])
+            let mileageForNextService: Double? = extractNumber(from: vehicleData["mileageForNextService"])
+            let nextServiceDate = vehicleData["daysForNextService"] as? String
+            let webManualUrl = vehicleData["webManualUrl"] as? String
+
             return Vehicle(
                 vin: vin,
                 regId: regId,
@@ -69,7 +75,12 @@ extension HyundaiCanadaAPIClient {
                 accountId: accountId,
                 fuelType: fuelType,
                 generation: generation,
-                odometer: Distance(length: odometerValue, units: .kilometers)
+                odometer: Distance(length: odometerValue, units: .kilometers),
+                trim: trim,
+                preConditioningOption: preConditioningOption,
+                mileageForNextService: mileageForNextService,
+                nextServiceDate: nextServiceDate,
+                webManualUrl: webManualUrl
             )
         }
     }
