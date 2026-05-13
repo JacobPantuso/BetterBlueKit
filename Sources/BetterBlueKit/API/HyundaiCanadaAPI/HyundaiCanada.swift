@@ -107,11 +107,17 @@ extension HyundaiCanadaAPIClient {
         }
 
         let error = json["error"] as? [String: Any]
+        let errorCode = error?["errorCode"] as? String
         let errorDesc = (error?["errorDesc"] as? String) ?? "Unknown Canada API error: \(json)"
         let lower = errorDesc.lowercased()
 
         if lower.contains("expired") || lower.contains("deleted") || lower.contains("ip validation") {
             throw APIError.invalidCredentials(errorDesc, apiName: apiName)
+        }
+
+        // 6533: Bluelink is already processing a prior request for this vehicle
+        if errorCode == "6533" || lower.contains("processing an earlier inquiry") {
+            throw APIError.concurrentRequest(errorDesc, apiName: apiName)
         }
 
         throw APIError.logError("Canada \(context) failed: \(errorDesc)", apiName: apiName)

@@ -179,24 +179,21 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
     private func injectLocationCoordinates(into data: Data, vehicle: Vehicle, authToken: AuthToken) async -> Data {
         do {
             let pAuth = try await fetchCommandAuthCode(authToken: authToken)
-            let (locationData, _, _) = try await performJSONRequest(
-                url: "\(apiBaseURL)/fndmcr",
-                method: .POST,
-                headers: authorizedHeaders(authToken: authToken, vehicleId: vehicle.regId, pAuth: pAuth),
-                body: ["pin": pin],
-                requestType: .fetchVehicleStatus,
-                vin: vehicle.vin
+
+            // fndmcr returns 6533 when the car's modem is still processing a prior request.
+            // fetchLocationWithRetry parses the response inside the loop so the .concurrentRequest
+            // error is actually caught and retried (parsing is where the 6533 is detected).
+            let location = try await fetchLocationWithRetry(
+                vehicle: vehicle,
+                authToken: authToken,
+                pAuth: pAuth
             )
-            let location = try parseCanadaLocationResponse(locationData)
 
             guard var finalJson = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 return data
             }
 
-            let coord: [String: Any] = [
-                "lat": location.latitude,
-                "lon": location.longitude
-            ]
+            let coord: [String: Any] = ["lat": location.latitude, "lon": location.longitude]
             var result = finalJson["result"] as? [String: Any] ?? [:]
             var status = result["status"] as? [String: Any]
                 ?? result["vehicleStatus"] as? [String: Any] ?? [:]
@@ -209,6 +206,43 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
             BBLogger.debug(.api, "HyundaiCanada: failed injecting location: \(error)")
             return data
         }
+    }
+
+    private func fetchLocationWithRetry(
+        vehicle: Vehicle,
+        authToken: AuthToken,
+        pAuth: String,
+        maxAttempts: Int = 3,
+        retryDelayNanoseconds: UInt64 = 4_000_000_000
+    ) async throws -> VehicleStatus.Location {
+        var lastError: Error?
+        for attempt in 0..<maxAttempts {
+            if attempt > 0 {
+                BBLogger.debug(.api, "HyundaiCanada: fndmcr retry \(attempt)/\(maxAttempts - 1) — concurrent request, waiting \(retryDelayNanoseconds / 1_000_000_000)s")
+                try await Task.sleep(nanoseconds: retryDelayNanoseconds)
+            }
+            do {
+                // Append ?retry=N on retries so the HTTP log shows each attempt distinctly.
+                let url = attempt == 0
+                    ? "\(apiBaseURL)/fndmcr"
+                    : "\(apiBaseURL)/fndmcr?retry=\(attempt)"
+                let (locationData, _, _) = try await performJSONRequest(
+                    url: url,
+                    method: .POST,
+                    headers: authorizedHeaders(authToken: authToken, vehicleId: vehicle.regId, pAuth: pAuth),
+                    body: ["pin": pin],
+                    requestType: .fetchVehicleStatus,
+                    vin: vehicle.vin
+                )
+                // Parse inside the loop — the 6533 is in the JSON body (HTTP 200),
+                // so the throw only happens here, not in performJSONRequest.
+                return try parseCanadaLocationResponse(locationData)
+            } catch let error as APIError where error.errorType == .concurrentRequest {
+                BBLogger.debug(.api, "HyundaiCanada: fndmcr attempt \(attempt + 1) got concurrent request error")
+                lastError = error
+            }
+        }
+        throw lastError ?? APIError.logError("fndmcr failed after \(maxAttempts) attempts", apiName: apiName)
     }
 
     public func sendCommand(for vehicle: Vehicle, command: VehicleCommand, authToken: AuthToken) async throws {

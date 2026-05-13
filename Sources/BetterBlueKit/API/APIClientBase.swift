@@ -303,6 +303,19 @@ open class APIClientBase {
             return "API Error: \(error)"
         }
 
+        // Bluelink Canada format: {"error": {"errorCode": "6533", "errorDesc": "..."}, "responseHeader": {"responseCode": 1}}
+        if let responseHeader = json["responseHeader"] as? [String: Any],
+           let responseCode: Int = extractNumber(from: responseHeader["responseCode"]),
+           responseCode != 0,
+           let errorDict = json["error"] as? [String: Any] {
+            let errorCode = errorDict["errorCode"] as? String ?? "unknown"
+            let errorDesc = errorDict["errorDesc"] as? String ?? "Unknown error"
+            if errorCode == "6533" || errorDesc.lowercased().contains("processing an earlier inquiry") {
+                return "Vehicle Busy (\(errorCode)): \(errorDesc)"
+            }
+            return "API Error \(errorCode): \(errorDesc)"
+        }
+
         return nil
     }
 
