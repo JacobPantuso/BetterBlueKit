@@ -18,10 +18,17 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
     let clientSecret = "CLISCR01AHSPA"
     let userAgent = "MyHyundai/2.0.25 (iPhone; iOS 18.3; Scale/3.00)"
 
-    private let maxCommandPollAttempts = 30
-    let commandPollIntervalNanoseconds: UInt64 = 2_000_000_000
-
-    let deviceId = UUID().uuidString.uppercased()
+    /// Stable per-account device ID. Hyundai Canada's anti-fraud
+    /// challenge fires every time a "new device" logs in — using a
+    /// fresh random UUID per session guarantees the user sees an OTP
+    /// challenge (errorCode 7110) on every login. `BBAccount` already
+    /// generates and persists a stable UUID per account; honor that
+    /// when present, fall back to a random UUID only if the host
+    /// didn't supply one (e.g. bbcli without a stored config).
+    /// (Matches the hyundai_kia_connect_api Python reference, which
+    /// derives a deterministic device ID from MAC + hostname for the
+    /// same reason.)
+    lazy var deviceId: String = configuration.deviceId ?? UUID().uuidString.uppercased()
 
     let hvacFahrenheitValues: [Double] = Array(62...82).map { Double($0) }
     let hvacCelsiusValues: [Double] = [
@@ -34,6 +41,29 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
     ]
 
     var cloudFlareCookie: String?
+
+    // MARK: - MFA Flow State
+    //
+    // Hyundai Canada's MFA differs slightly from Kia USA's: the OTP key
+    // is only issued AFTER the user picks email/SMS (Kia returns it in
+    // the initial challenge). We stash everything we learn at each step
+    // here so the protocol's three-method MFA contract still works.
+    /// `userInfoUuid` returned by `mfa/selverifmeth`. Surfaced as `xid`
+    /// in the `requiresMFA` error and threaded through every later call.
+    var mfaUserInfoUuid: String?
+    /// Email associated with the account, returned by `selverifmeth` and
+    /// echoed back by `sendotp` / `genmfatkn`.
+    var mfaEmail: String?
+    /// `otpKey` returned by `mfa/sendotp`, consumed by `mfa/validateotp`.
+    var mfaOtpKey: String?
+    /// Last-4 (or full, depending on server) of the SMS number echoed
+    /// by `selverifmeth`. Threaded back into `sendotp` for the SMS
+    /// delivery path.
+    var mfaPhone: String?
+    /// Final auth token built from `mfa/genmfatkn`'s response. Returned
+    /// from `completeMFALogin` so the caller never sees the multi-step
+    /// dance under the hood.
+    var mfaCompletedAuthToken: AuthToken?
 
     var baseURL: String { region.apiBaseURL(for: .hyundai) }
     var apiBaseURL: String { "\(baseURL)/tods/api" }
@@ -61,6 +91,16 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
             ],
             requestType: .login
         )
+
+        // Intercept the OTP-required response (errorCode 7110) before
+        // the generic parser runs — it would otherwise throw a generic
+        // "Canada login failed" error and the caller couldn't tell
+        // that an MFA challenge is what's needed. `beginMFAFlow` always
+        // throws `requiresMFA` on success; control only returns here on
+        // a non-7110 response, which the regular parser handles.
+        if isOTPRequiredResponse(data) {
+            try await beginMFAFlow(cookie: cookie)
+        }
 
         return try parseCanadaLoginResponse(data)
     }
