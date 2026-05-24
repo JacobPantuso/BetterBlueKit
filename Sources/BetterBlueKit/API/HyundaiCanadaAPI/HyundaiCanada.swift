@@ -62,27 +62,40 @@ extension HyundaiCanadaAPIClient {
 
     // MARK: - Cloudflare Cookie
 
-    func fetchCloudFlareCookie() async throws -> String {
-        let (data, response) = try await performRequest(
-            url: "https://\(apiHost)/login",
+    /// Attempts to fetch the Cloudflare `__cf_bm` bot-management cookie by
+    /// loading the login page. Returns the cookie string if found, or `nil`
+    /// if Cloudflare is not enforcing it (the server now sets it via JS rather
+    /// than a `Set-Cookie` header, so native HTTP clients may not receive it).
+    func fetchCloudFlareCookie() async throws -> String? {
+        let loginURL = URL(string: "https://\(apiHost)/login")!
+
+        let (_, response) = try await performRequest(
+            url: loginURL.absoluteString,
             method: .GET,
             headers: headers(),
             requestType: .login
         )
 
-        _ = data
-
-        let responseHeaders = extractResponseHeaders(from: response)
-        let cookies = HTTPCookie.cookies(
-            withResponseHeaderFields: responseHeaders,
-            for: URL(string: "https://\(apiHost)/login")!
-        )
-
-        guard let cookie = cookies.first(where: { $0.name.lowercased() == "__cf_bm" }) else {
-            throw APIError.logError("CloudFlare cookie missing from login response", apiName: apiName)
+        // Primary: parse Set-Cookie headers from the final response.
+        if let cookie = HTTPCookie.cookies(
+            withResponseHeaderFields: extractResponseHeaders(from: response),
+            for: loginURL
+        ).first(where: { $0.name.lowercased() == "__cf_bm" }) {
+            return "__cf_bm=\(cookie.value)"
         }
 
-        return "__cf_bm=\(cookie.value)"
+        // Fallback: URLSession stores cookies from all responses in the redirect
+        // chain into HTTPCookieStorage.shared; check there too.
+        if let cookie = HTTPCookieStorage.shared.cookies(for: loginURL)?
+            .first(where: { $0.name.lowercased() == "__cf_bm" }) {
+            return "__cf_bm=\(cookie.value)"
+        }
+
+        // Cookie not present — Cloudflare may be enforcing via JS challenge only.
+        // Log a warning and let the caller proceed; the POST login will surface
+        // any actual rejection from the server.
+        BBLogger.warning(.auth, "HyundaiCanada: __cf_bm cookie not found in login page response — proceeding without it")
+        return nil
     }
 
     // MARK: - Shared Response Parser

@@ -10,6 +10,7 @@ Package.resolved
 *.xcuserdatad/
 DerivedData/
 build/
+.vscode/
 
 # macOS
 .DS_Store

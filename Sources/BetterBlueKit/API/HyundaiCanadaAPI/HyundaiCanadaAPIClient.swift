@@ -79,7 +79,7 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
         let cookie = try await ensureCloudFlareCookie()
 
         var loginHeaders = headers()
-        loginHeaders["Cookie"] = cookie
+        if let cookie { loginHeaders["Cookie"] = cookie }
 
         let (data, _, _) = try await performJSONRequest(
             url: "\(apiBaseURL)/v2/login",
@@ -99,7 +99,7 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
         // throws `requiresMFA` on success; control only returns here on
         // a non-7110 response, which the regular parser handles.
         if isOTPRequiredResponse(data) {
-            try await beginMFAFlow(cookie: cookie)
+            try await beginMFAFlow(cookie: cookie ?? "")
         }
 
         return try parseCanadaLoginResponse(data)
@@ -125,6 +125,16 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
         authToken: AuthToken,
         cached: Bool
     ) async throws -> VehicleStatus {
+        try await fetchVehicleStatus(for: vehicle, authToken: authToken, cached: cached, includeLocation: true)
+    }
+
+    // Overload that allows skipping location injection
+    public func fetchVehicleStatus(
+        for vehicle: Vehicle,
+        authToken: AuthToken,
+        cached: Bool,
+        includeLocation: Bool
+    ) async throws -> VehicleStatus {
         _ = try await ensureCloudFlareCookie()
 
         let statusEndpoint = cached ? "sltvhcl" : "rltmvhclsts"
@@ -142,7 +152,7 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
             vehicle: vehicle,
             authToken: authToken
         )
-        let finalData = await injectLocationCoordinates(into: statusData, vehicle: vehicle, authToken: authToken)
+        let finalData = includeLocation ? await injectLocationCoordinates(into: statusData, vehicle: vehicle, authToken: authToken) : statusData
 
         do {
             return try parseCanadaVehicleStatusResponse(finalData, for: vehicle)
@@ -401,7 +411,7 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
         var attempts = 0
         var lastKnownResult = "unknown"
 
-        while attempts <= maxCommandPollAttempts {
+        while attempts <= 30 {
             let (data, _, _) = try await performJSONRequest(
                 url: "\(apiBaseURL)/rmtsts",
                 method: .POST,
@@ -425,7 +435,7 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
             }
 
             attempts += 1
-            try await Task.sleep(nanoseconds: commandPollIntervalNanoseconds)
+            try await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
         throw APIError.logError(
@@ -434,7 +444,7 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
         )
     }
 
-    private func ensureCloudFlareCookie() async throws -> String {
+    private func ensureCloudFlareCookie() async throws -> String? {
         if let cloudFlareCookie, !cloudFlareCookie.isEmpty {
             return cloudFlareCookie
         }

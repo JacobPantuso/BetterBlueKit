@@ -131,6 +131,18 @@ extension APIClientProtocol {
     ) async throws -> VehicleStatus {
         try await fetchVehicleStatus(for: vehicle, authToken: authToken, cached: true)
     }
+
+    /// Overload that allows skipping location injection (e.g. for Live Activity wakeups where location is irrelevant).
+    /// Default implementation ignores `includeLocation` and calls through. Only clients that support
+    /// location injection (HyundaiCanada) override this.
+    public func fetchVehicleStatus(
+        for vehicle: Vehicle,
+        authToken: AuthToken,
+        cached: Bool,
+        includeLocation: Bool
+    ) async throws -> VehicleStatus {
+        try await fetchVehicleStatus(for: vehicle, authToken: authToken, cached: cached)
+    }
 }
 
 // MARK: - HTTP Method

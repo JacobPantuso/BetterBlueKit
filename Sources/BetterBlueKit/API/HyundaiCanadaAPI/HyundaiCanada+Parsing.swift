@@ -45,11 +45,8 @@ extension HyundaiCanadaAPIClient {
                 vehicleData["registrationId"] as? String ??
                 vin
 
-            let nickname =
-                vehicleData["nickName"] as? String ??
-                vehicleData["modelName"] as? String ??
-                vehicleData["model"] as? String ??
-                vin
+            let rawNickname = vehicleData["modelName"] as? String ?? "IONIQ"
+            let nickname = rawNickname.hasSuffix(" EV") ? String(rawNickname.dropLast(3)) : rawNickname
 
             let generation: Int =
                 extractNumber(from: vehicleData["vehicleGeneration"]) ??
