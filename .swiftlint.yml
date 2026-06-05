@@ -1,0 +1,35 @@
+# SwiftLint configuration for BetterBlueKit.
+#
+# Excludes:
+#   - .build / .swiftpm — generated artifacts and SPM checkouts
+#   - Tests             — fixture-heavy parsing tests legitimately
+#                         accumulate long files; not worth fighting
+#
+# Rule bumps below are scoped to what BBCLI (the CLI tool target)
+# legitimately needs. The framework's library source clears every
+# rule at default thresholds.
+
+excluded:
+  - .build
+  - .swiftpm
+  - Tests
+
+# BBCLI's command dispatchers naturally branch heavily — a single
+# `bb status` subcommand handler easily hits 17–18 paths and
+# 60–70 lines. Bump the relevant limits enough that the CLI tool
+# stays clean without surgical disables on every handler.
+file_length:
+  warning: 1000
+  error: 1500
+
+function_body_length:
+  warning: 80
+  error: 120
+
+cyclomatic_complexity:
+  warning: 20
+  error: 30
+
+line_length:
+  warning: 140
+  error: 200

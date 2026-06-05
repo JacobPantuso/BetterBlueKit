@@ -55,7 +55,9 @@ private func createKiaClient(configuration: APIClientConfiguration) throws -> an
     switch configuration.region {
     case .usa:
         return KiaUSAAPIClient(configuration: configuration)
-    case .canada, .europe, .australia, .china, .india:
+    case .europe:
+        return KiaEuropeAPIClient(configuration: configuration)
+    case .canada, .australia, .china, .india:
         throw APIError.regionNotSupported(
             "\(Brand.kia.displayName) is not yet supported in \(configuration.region.rawValue)"
         )
@@ -70,7 +72,7 @@ public func supportedRegions(for brand: Brand) -> [Region] {
     case .hyundai:
         return [.usa, .canada, .europe]
     case .kia:
-        return [.usa]
+        return [.usa, .europe]
     case .fake:
         return Region.allCases
     }
@@ -80,6 +82,29 @@ public func betaRegions(for brand: Brand) -> [Region] {
     switch brand {
     case .hyundai:
         return [.canada, .europe]
+    case .kia:
+        return [.europe]
     default: return []
+    }
+}
+
+/// Whether a given brand/region pair requires the user to supply a
+/// Bluelink / Kia Connect service PIN at account-setup time. UIs
+/// can call this to show/hide the PIN field on the add-account form.
+///
+/// Today the gating is hardcoded:
+///   - Hyundai USA / Canada / EU
+///   - Kia EU
+///
+/// Kia USA and Fake authenticate without a PIN.
+public func requiresPin(brand: Brand, region: Region) -> Bool {
+    switch (brand, region) {
+    case (.hyundai, .usa),
+         (.hyundai, .canada),
+         (.hyundai, .europe),
+         (.kia, .europe):
+        return true
+    default:
+        return false
     }
 }

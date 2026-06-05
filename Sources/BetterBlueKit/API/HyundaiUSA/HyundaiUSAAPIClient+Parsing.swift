@@ -177,6 +177,16 @@ extension HyundaiUSAAPIClient {
         }
 
         let fuelPercentage: Double = extractNumber(from: evStatusData["batteryStatus"]) ?? 0
+        // Trust the API's `unit` field. The Hyundai USA backend has
+        // been observed mislabelling the value (e.g. returning a
+        // kilometre value with unit=3=miles), but the canonical Python
+        // reference (`hyundai_kia_connect_api`) doesn't try to
+        // cross-validate either — and earlier in-tree attempts to do
+        // so wound up "correcting" honest payloads. If users hit
+        // recurring mislabels we can add a per-vehicle unit override
+        // in the settings; for now match the broader ecosystem and
+        // accept the occasional stale-server reading. A refresh in
+        // the app reliably clears it.
         let remainTime2 = evStatusData["remainTime2"] as? [String: Any] ?? [:]
         let atc = remainTime2["atc"] as? [String: Any] ?? [:]
         let chargeTimeMinutes: Int = extractNumber(from: atc["value"]) ?? 0

@@ -192,7 +192,11 @@ struct MeasurementsTests {
 
         let temp3 = Temperature(units: nil, value: nil)
         #expect(temp3.units == .celsius)
-        #expect(temp3.value == Temperature.minimum)
+        // `Temperature.minimum` is defined in Fahrenheit (62.0). When
+        // units default to Celsius, the init converts the minimum
+        // through `Units.fahrenheit.convert(_:to: .celsius)` so the
+        // resulting value matches the chosen units.
+        #expect(temp3.value == Temperature.Units.fahrenheit.convert(Temperature.minimum, to: .celsius))
     }
 
     @Test("Temperature initialization with HI value")
@@ -260,5 +264,69 @@ struct MeasurementsTests {
         // Absolute zero
         let absoluteZero = celsius.format(-273.15, to: .fahrenheit)
         #expect(absoluteZero == "-460°F")
+    }
+
+    // MARK: - HVAC table-based conversion
+
+    @Test("hvacConvert snaps to 0.5°C grid (EU table)")
+    func testHvacConvertSnapsToEuGrid() {
+        // 72°F → 22.0°C exactly under the EU table (not the
+        // off-grid 22.22°C the linear formula produces).
+        let result = Temperature.hvacConvert(72, from: .fahrenheit, to: .celsius, table: .european)
+        #expect(result == 22.0)
+    }
+
+    @Test("hvacConvert round-trips on the EU table")
+    func testHvacConvertRoundTripEu() {
+        let pairs: [(Double, Int)] = [(15.0, 58), (18.0, 64), (22.0, 72), (25.0, 78), (30.0, 88)]
+        for (c, f) in pairs {
+            #expect(Temperature.hvacConvert(c, from: .celsius, to: .fahrenheit, table: .european) == Double(f))
+            #expect(Temperature.hvacConvert(Double(f), from: .fahrenheit, to: .celsius, table: .european) == c)
+        }
+    }
+
+    @Test("hvacConvert handles Standard table duplicate-target rows")
+    func testHvacConvertStandardDuplicates() {
+        // Standard table maps BOTH 17.5°C and 18.0°C → 63°F.
+        // F→C from 63 returns the lower (17.5) — matches Hyundai's
+        // UI tie-break.
+        let lower = Temperature.hvacConvert(63, from: .fahrenheit, to: .celsius, table: .standard)
+        #expect(lower == 17.5)
+        #expect(Temperature.hvacConvert(17.5, from: .celsius, to: .fahrenheit, table: .standard) == 63)
+        #expect(Temperature.hvacConvert(18.0, from: .celsius, to: .fahrenheit, table: .standard) == 63)
+    }
+
+    @Test("hvacConvert is identity when units match")
+    func testHvacConvertIdentity() {
+        #expect(Temperature.hvacConvert(22.5, from: .celsius, to: .celsius) == 22.5)
+        #expect(Temperature.hvacConvert(72, from: .fahrenheit, to: .fahrenheit) == 72)
+    }
+
+    @Test("snapToHalfDegreeCelsius rounds to 0.5°C grid")
+    func testSnapToHalfDegree() {
+        #expect(Temperature.snapToHalfDegreeCelsius(22.22) == 22.0)
+        #expect(Temperature.snapToHalfDegreeCelsius(22.25) == 22.5)
+        #expect(Temperature.snapToHalfDegreeCelsius(22.0) == 22.0)
+        #expect(Temperature.snapToHalfDegreeCelsius(21.74) == 21.5)
+    }
+
+    @Test("encodeAirTempToHEX produces the legacy HEX codes")
+    func testEncodeAirTempHexRoundTrip() {
+        #expect(Temperature.encodeAirTempToHEX(celsiusValue: 17.0) == "06H")
+        #expect(Temperature.encodeAirTempToHEX(celsiusValue: 22.0) == "10H")
+        #expect(Temperature.encodeAirTempToHEX(celsiusValue: 27.0) == "1AH")
+        // Off-grid input snaps before encoding.
+        #expect(Temperature.encodeAirTempToHEX(celsiusValue: 22.22) == "10H")
+    }
+
+    @Test("ClimateOptions(preferredUnits:) honors caller's preferred unit")
+    func testClimateOptionsPreferredUnits() {
+        let f = ClimateOptions(preferredUnits: .fahrenheit)
+        #expect(f.temperature.units == .fahrenheit)
+        #expect(f.temperature.value == 72)
+
+        let c = ClimateOptions(preferredUnits: .celsius)
+        #expect(c.temperature.units == .celsius)
+        #expect(c.temperature.value == 22)
     }
 }

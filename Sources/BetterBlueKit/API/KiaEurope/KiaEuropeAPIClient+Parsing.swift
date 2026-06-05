@@ -1,15 +1,37 @@
 //
-//  HyundaiEuropeAPIClient+Parsing.swift
+//  KiaEuropeAPIClient+Parsing.swift
 //  BetterBlueKit
 //
-//  Response parsing for Hyundai Europe API
+//  Response parsing for the Kia Europe client. Reuses the
+//  HyEuResponseKeyPathMap because CCS2 / legacy response shapes are
+//  shared between Hyundai EU and Kia EU.
 //
 
 import Foundation
 
-// MARK: - Response Parsing
+extension KiaEuropeAPIClient {
 
-extension HyundaiEuropeAPIClient {
+    package func parseAuthToken(from data: Data, isRefresh: Bool) throws -> AuthToken {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accessToken = json["access_token"] as? String,
+              let expiresIn = json["expires_in"] as? Int else {
+            throw APIError(
+                message: "Failed to parse AuthToken response",
+                apiName: apiName,
+                errorType: .invalidCredentials
+            )
+        }
+
+        let refreshToken: String = isRefresh
+            ? (json["refresh_token"] as? String ?? configuration.refreshToken ?? "")
+            : (configuration.refreshToken ?? "")
+
+        return AuthToken(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn))
+        )
+    }
 
     package func parseVehiclesResponse(_ data: Data) throws -> [Vehicle] {
         guard
@@ -17,13 +39,13 @@ extension HyundaiEuropeAPIClient {
             let resMsg = json["resMsg"] as? [String: Any],
             let vehicleArray = resMsg["vehicles"] as? [[String: Any]]
         else {
-            throw APIError.logError( "Invalid vehicles response", apiName: apiName )
+            throw APIError.logError("Invalid vehicles response", apiName: apiName)
         }
 
         return vehicleArray.compactMap { vehicleData -> Vehicle? in
             guard let vehicleId = vehicleData["vehicleId"] as? String,
-                let vin = vehicleData["vin"] as? String,
-                let nickname = vehicleData["nickname"] as? String
+                  let vin = vehicleData["vin"] as? String,
+                  let nickname = vehicleData["nickname"] as? String
                     ?? vehicleData["vehicleName"] as? String
             else { return nil }
 
@@ -34,8 +56,8 @@ extension HyundaiEuropeAPIClient {
                 case "P", "PE": .phev
                 default: .gas
                 }
-            let generation = 2  // always 2 there is no such attribute
-            let ccs2: Bool = getBoolFromJson( from: vehicleData, key: "ccuCCS2ProtocolSupport" )
+            let generation = 2
+            let ccs2: Bool = getBoolFromJson(from: vehicleData, key: "ccuCCS2ProtocolSupport")
 
             return Vehicle(
                 vin: vin,
@@ -45,13 +67,13 @@ extension HyundaiEuropeAPIClient {
                 fuelType: fuelType,
                 generation: generation,
                 odometer: Distance(length: 0, units: .kilometers),
-                marketOptions: .hyundaiEurope(ccs2Supported: ccs2)
+                marketOptions: .kiaEurope(ccs2Supported: ccs2)
             )
         }
     }
 
-    package func parseVehicleStatusResponse( _ data: Data, _ locationData: Data?, for vehicle: Vehicle )
-    throws -> VehicleStatus {
+    package func parseVehicleStatusResponse(_ data: Data, _ locationData: Data?, for vehicle: Vehicle)
+        throws -> VehicleStatus {
         guard
             let statusJson = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             let resMsg = statusJson["resMsg"] as? [String: Any]
@@ -59,26 +81,23 @@ extension HyundaiEuropeAPIClient {
             throw APIError.logError("Invalid status response", apiName: apiName)
         }
 
-        // park data are optional -> location from vehicle status is used in case of error
         var parkData: [String: Any] = [:]
-        if let locationData = locationData,
-           let parkJson = try? JSONSerialization.jsonObject(with: locationData, options: []) as? [String: Any] {
-            parkData = parkJson["resMsg"] as? [String: Any] ?? [:]
-        } else {
-            BBLogger.warning(.api, "Failed to parse park data using location from vehicle status" )
-            parkData = [:]
+        if let locationData {
+            do {
+                let parkJson = try JSONSerialization.jsonObject(with: locationData, options: []) as? [String: Any]
+                parkData = parkJson?["resMsg"] as? [String: Any] ?? [:]
+            } catch {
+                BBLogger.warning(.api, "Failed to parse park data: \(error.localizedDescription)")
+            }
         }
 
         let ccs2 = vehicle.marketOptions?.ccs2Supported ?? false
         let pathMap = HyEuResponseKeyPathMap(profile: ccs2 ? .ccs2 : .legacy)
+        let vehicleData = getChildFromJson(from: resMsg, key: pathMap[.vehicleState])
 
-        let vehicleData = getChildFromJson( from: resMsg, key: pathMap[.vehicleState] )
-
-        // get datetime string from response (utc) and transform it to date
-        let syncDate = BluelinkDateParser.parse(getAnyFromJson( from: resMsg,
-                                                                key: pathMap[.syncDate] ) as? String,
-                                                timeZone: TimeZone(identifier: "Europe/Berlin"))
-        // get odometer from drivetrain data
+        let syncDate = Date(
+            timeIntervalSince1970: getDoubleFromJson(from: resMsg, key: pathMap[.syncDate]) / 1000
+        )
         let odo = Distance(
             length: getDoubleFromJson(from: vehicleData, key: pathMap[.odo]),
             units: Distance.Units(1)
@@ -88,7 +107,7 @@ extension HyundaiEuropeAPIClient {
             vin: vehicle.vin,
             gasRange: nil,
             evStatus: vehicle.fuelType.hasElectricCapability
-            ? parseEVStatus(from: vehicleData, pathMap: pathMap) : nil,
+                ? parseEVStatus(from: vehicleData, pathMap: pathMap) : nil,
             location: parseLocation(from: vehicleData, park: parkData, pathMap: pathMap),
             lockStatus: parseLockStatus(from: vehicleData, pathMap: pathMap),
             climateStatus: parseClimateStatus(from: vehicleData, pathMap: pathMap),
@@ -98,24 +117,8 @@ extension HyundaiEuropeAPIClient {
             doorOpen: parseDoorOpen(from: vehicleData, pathMap: pathMap),
             trunkOpen: getBoolFromJson(from: vehicleData, key: pathMap[.trunk]),
             hoodOpen: getBoolFromJson(from: vehicleData, key: pathMap[.hood]),
-            tirePressureWarning: parseTirePressure(from: vehicleData, pathMap: pathMap),
-            engineOn: getBoolFromJson(from: vehicleData, key: pathMap[.engineOn])
+            tirePressureWarning: parseTirePressure(from: vehicleData, pathMap: pathMap)
         )
-    }
-
-    package func parseAuthToken(from data: Data, isRefresh: Bool) throws -> AuthToken {
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rToken = isRefresh ? json["refresh_token"] as? String : configuration.refreshToken,
-              let expiresIn = json["expires_in"] as? Int,
-              let accessToken = json["access_token"] as? String else {
-            throw APIError(message: "Failed to parse AuthToken info", apiName: apiName, errorType: .invalidCredentials)
-        }
-
-        return AuthToken(
-                accessToken: accessToken,
-                refreshToken: rToken,
-                expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn))
-            )
     }
 
     private func parseEVStatus(from vehicleState: [String: Any], pathMap: HyEuResponseKeyPathMap)
@@ -123,6 +126,7 @@ extension HyundaiEuropeAPIClient {
 
         let batterySOC = getDoubleFromJson(from: vehicleState, key: pathMap[.soc])
         let remainChargeTime = getDoubleFromJson(from: vehicleState, key: pathMap[.chargeTime])
+        let pluggedIn = getBoolFromJson(from: vehicleState, key: pathMap[.pluggedIn])
         let plugType: Int = extractNumber(from: getAnyFromJson(from: vehicleState,
                                                 key: pathMap[.pluggedIn])) ?? 0
         let estimatedRange = getDoubleFromJson(from: vehicleState, key: pathMap[.rangeTotal])
@@ -135,9 +139,9 @@ extension HyundaiEuropeAPIClient {
             targetDC = getDoubleFromJson(from: vehicleState, key: pathMap[.targetDC])
             isCharging = remainChargeTime > 0
         } else {
-            let targetSocList = getAnyFromJson(from: vehicleState, key: pathMap[.targetSocList])
-            let socList = targetSocList as? [[String: Any]] ?? []
-            for target in socList {
+            let targetSocList = getChildFromJson(from: vehicleState,
+                                                 key: pathMap[.targetSocList]) as? [[String: Any]] ?? []
+            for target in targetSocList {
                 if let plugType = target["plugType"] as? Int,
                    let soc = target["targetSOClevel"] as? Double {
                     if plugType == 1 {
@@ -149,17 +153,21 @@ extension HyundaiEuropeAPIClient {
             }
             isCharging = getBoolFromJson(from: vehicleState, key: pathMap[.isCharging])
         }
-        let chargePower = max(getDoubleFromJson(from: vehicleState, key: pathMap[.chargePowerStd]),
-                              getDoubleFromJson(from: vehicleState, key: pathMap[.chargePowerFst]))
+        // Pre-existing bug: `pathMap[.chargePower]` referenced a
+        // non-existent enum case (the EU response keys split it
+        // into Std + Fst). Match HyundaiEurope's parser, which
+        // takes whichever of the two has a value.
+        let chargePower = max(
+            getDoubleFromJson(from: vehicleState, key: pathMap[.chargePowerStd]),
+            getDoubleFromJson(from: vehicleState, key: pathMap[.chargePowerFst])
+        )
 
+        _ = pluggedIn // surfaced via plugType today; kept for future parity
         return VehicleStatus.EVStatus(
             charging: isCharging,
             chargeSpeed: chargePower,
             evRange: VehicleStatus.FuelRange(
-                range: Distance(
-                    length: estimatedRange,
-                    units: Distance.Units(driveUnit)
-                ),
+                range: Distance(length: estimatedRange, units: Distance.Units(driveUnit)),
                 percentage: batterySOC
             ),
             plugType: VehicleStatus.PlugType(fromBatteryPlugin: plugType),
@@ -169,13 +177,11 @@ extension HyundaiEuropeAPIClient {
         )
     }
 
-    private func parseDoorOpen(
-        from vehicleState: [String: Any],
-        pathMap: HyEuResponseKeyPathMap
-    ) -> VehicleStatus.DoorStatus? {
-        guard
-            getAnyFromJson(from: vehicleState, key: pathMap[.doorFrontLeft]) is Int
-        else { return nil }
+    private func parseDoorOpen(from vehicleState: [String: Any], pathMap: HyEuResponseKeyPathMap)
+        -> VehicleStatus.DoorStatus? {
+        guard getAnyFromJson(from: vehicleState, key: pathMap[.doorFrontLeft]) is Int else {
+            return nil
+        }
         return VehicleStatus.DoorStatus(
             frontLeft: getBoolFromJson(from: vehicleState, key: pathMap[.doorFrontLeft]),
             frontRight: getBoolFromJson(from: vehicleState, key: pathMap[.doorFrontRight]),
@@ -191,78 +197,44 @@ extension HyundaiEuropeAPIClient {
                 locked: getBoolFromJson(from: vehicleState, key: pathMap[.lockStatus])
             )
         }
-        let driver = getBoolFromJson(
-            from: vehicleState,
-            key: pathMap[.lock1L],
-            inverted: true
-        )
-        let passanger = getBoolFromJson(
-            from: vehicleState,
-            key: pathMap[.lock1R],
-            inverted: true
-        )
-        let backLeft = getBoolFromJson(
-            from: vehicleState,
-            key: pathMap[.lock2L],
-            inverted: true
-        )
-        let backRight = getBoolFromJson(
-            from: vehicleState,
-            key: pathMap[.lock2R],
-            inverted: true
-        )
-        return VehicleStatus.LockStatus(
-            locked: driver && passanger && backLeft && backRight
-        )
+        let driver = getBoolFromJson(from: vehicleState, key: pathMap[.lock1L], inverted: true)
+        let passenger = getBoolFromJson(from: vehicleState, key: pathMap[.lock1R], inverted: true)
+        let backLeft = getBoolFromJson(from: vehicleState, key: pathMap[.lock2L], inverted: true)
+        let backRight = getBoolFromJson(from: vehicleState, key: pathMap[.lock2R], inverted: true)
+        return VehicleStatus.LockStatus(locked: driver && passenger && backLeft && backRight)
     }
 
     private func parseClimateStatus(from vehicleState: [String: Any], pathMap: HyEuResponseKeyPathMap)
-    -> VehicleStatus.ClimateStatus {
-
+        -> VehicleStatus.ClimateStatus {
         let temp = Temperature(
             units: getAnyFromJson(from: vehicleState, key: pathMap[.tempUnit]) as? Int ?? 0,
-            value: getAnyFromJson(from: vehicleState, key: pathMap[.airTemp]) as? String ?? "",
+            value: getAnyFromJson(from: vehicleState, key: pathMap[.airTemp]) as? String
         )
-
-        var airConOn: Bool = false
-        if pathMap.apiProfile == .legacy {
-            airConOn = getBoolFromJson(from: vehicleState, key: pathMap[.airControlOn])
-        } else {
-            airConOn = getAnyFromJson(from: vehicleState, key: pathMap[.airconSpeed]) as? Int ?? 0 > 0
-        }
-
         return VehicleStatus.ClimateStatus(
             defrostOn: getBoolFromJson(from: vehicleState, key: pathMap[.defrostOn]),
-            airControlOn: airConOn,
+            airControlOn: (getAnyFromJson(from: vehicleState, key: pathMap[.airconSpeed]) as? Int ?? 0) > 0,
             steeringWheelHeatingOn: getBoolFromJson(from: vehicleState, key: pathMap[.steeringWheelHeatOn]),
             temperature: temp
         )
     }
 
     private func parseLocation(from vehicleState: [String: Any], park: [String: Any], pathMap: HyEuResponseKeyPathMap)
-    -> VehicleStatus.Location {
+        -> VehicleStatus.Location {
         let locationDateString = getAnyFromJson(
             from: vehicleState, key: pathMap[.locationDate]) as? String ?? "20000101010000.000"
         let parkDateString = getAnyFromJson(
             from: park, key: pathMap[.parkDate]) as? String ?? "20000101020000"
 
-        /*
-         * Workaround because CCS2 location in status is currently stale
-         * normally we would just use coords from vehicleState without time check
-         */
+        let dateFormatter = DateFormatter()
+        dateFormatter.timeZone = TimeZone.current
+        dateFormatter.dateFormat = "yyyyMMddHHmmss"
+        let parkDate = dateFormatter.date(from: parkDateString) ?? Date(timeIntervalSince1970: 0)
 
-        // park date is always in exact Zone
-        let parkDate = BluelinkDateParser.parse(parkDateString, timeZone: TimeZone.current)
+        dateFormatter.timeZone = TimeZone.gmt
+        dateFormatter.dateFormat = "yyyyMMddHHmmss.SSS"
+        let locationDate = dateFormatter.date(from: locationDateString) ?? Date(timeIntervalSince1970: 0)
 
-        /*
-         * status location is currently in UTC for ccs2 cars
-         * "Offset" value seems to be a hint what timezone the car is in
-         */
-        let locationTimeZone = pathMap.apiProfile == .legacy ? TimeZone(identifier: "Europe/Berlin") : TimeZone.gmt
-        let locationDate = BluelinkDateParser.parse(locationDateString, timeZone: locationTimeZone)
-
-        // location date is older than parking endpoint date -> use parking location
-        if let parkDate, let locationDate, locationDate.compare(parkDate).rawValue <= 0 {
+        if locationDate.compare(parkDate).rawValue <= 0 {
             return VehicleStatus.Location(
                 latitude: getDoubleFromJson(from: park, key: pathMap[.parkLat]),
                 longitude: getDoubleFromJson(from: park, key: pathMap[.parkLon])
@@ -275,10 +247,10 @@ extension HyundaiEuropeAPIClient {
     }
 
     private func parseTirePressure(from vehicleState: [String: Any], pathMap: HyEuResponseKeyPathMap)
-    -> VehicleStatus.TirePressureWarning? {
-        guard
-            let all = getAnyFromJson(from: vehicleState, key: pathMap[.tpmsStatus])
-        else { return nil }
+        -> VehicleStatus.TirePressureWarning? {
+        guard let all = getAnyFromJson(from: vehicleState, key: pathMap[.tpmsStatus]) else {
+            return nil
+        }
         return VehicleStatus.TirePressureWarning(
             frontLeft: getBoolFromJson(from: vehicleState, key: pathMap[.tpmsFrontLeft]),
             frontRight: getBoolFromJson(from: vehicleState, key: pathMap[.tpmsFrontRight]),
@@ -288,22 +260,24 @@ extension HyundaiEuropeAPIClient {
         )
     }
 
+    // MARK: - JSON traversal helpers
+    // (duplicated from HyundaiEuropeAPIClient+Parsing; left private to keep
+    // the Kia EU surface independent. A future refactor could lift these
+    // into a shared utility — out of scope for the Kia EU PR.)
+
     private func getBoolFromJson(from data: [String: Any], key keyString: String?, inverted: Bool = false) -> Bool {
         if keyString == nil || keyString!.isEmpty { return false }
         switch getAnyFromJson(from: data, key: keyString) {
         case let value as Bool:
-            if inverted { return !value } else { return value }
+            return inverted ? !value : value
         case let value as Int:
-            if inverted { return value == 0 } else { return value == 1 }
+            return inverted ? value == 0 : value == 1
         case let value as String:
+            let lower = value.lowercased()
             if inverted {
-                return value.lowercased() == "false"
-                    || value.lowercased() == "0"
-                    || value.lowercased() == "no"
+                return lower == "false" || lower == "0" || lower == "no"
             } else {
-                return value.lowercased() == "true"
-                    || value.lowercased() == "1"
-                    || value.lowercased() == "yes"
+                return lower == "true" || lower == "1" || lower == "yes"
             }
         default: return false
         }
@@ -314,7 +288,7 @@ extension HyundaiEuropeAPIClient {
         switch getAnyFromJson(from: data, key: keyString!) {
         case let value as Double: return value
         case let value as Int: return Double(value)
-        case let value as String: return Double(value)!
+        case let value as String: return Double(value) ?? 0
         default: return 0
         }
     }
@@ -322,7 +296,7 @@ extension HyundaiEuropeAPIClient {
     private func getChildFromJson(from data: [String: Any], key keyString: String?) -> [String: Any] {
         if keyString == nil || keyString!.isEmpty { return data }
         var current = data
-        for (key) in keyString!.split(separator: ".") {
+        for key in keyString!.split(separator: ".") {
             if let value = current[String(key)] as? [String: Any] {
                 current = value
             }
@@ -331,29 +305,15 @@ extension HyundaiEuropeAPIClient {
     }
 
     private func getAnyFromJson(from data: [String: Any], key keyString: String?) -> Any? {
-        guard let keyString, !keyString.isEmpty else { return nil }
-
-        var current: Any = data
-
-        for key in keyString.split(separator: ".") {
-            let keyStr = String(key)
-
-            if let dict = current as? [String: Any] {
-                // default dictionary access
-                guard let next = dict[keyStr] else { return nil }
-                current = next
-
-            } else if let array = current as? [Any] {
-                // array access with index ("drvDistance.0.rangeByFuel")
-                guard let index = Int(keyStr), array.indices.contains(index) else { return nil }
-                current = array[index]
-
+        if keyString == nil || keyString!.isEmpty { return nil }
+        var current = data
+        for key in keyString!.split(separator: ".") {
+            if let value = current[String(key)] as? [String: Any] {
+                current = value
             } else {
-                // no Dict or Array → no further child found
-                return nil
+                return current[String(key)]
             }
         }
-
-        return current
+        return nil
     }
 }

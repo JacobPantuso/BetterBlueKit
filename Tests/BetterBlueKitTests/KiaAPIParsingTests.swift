@@ -181,6 +181,79 @@ struct KiaAPIClientTests {
         let client = KiaUSAAPIClient(configuration: config)
         #expect(client.supportsMFA() == true)
     }
+
+    @MainActor private func makeKiaUSClient() -> KiaUSAAPIClient {
+        KiaUSAAPIClient(configuration: APIClientConfiguration(
+            region: .usa, brand: .kia, username: "test@example.com",
+            password: "password123", pin: "0000", accountId: UUID()
+        ))
+    }
+
+    private func makeVehicle() -> Vehicle {
+        Vehicle(
+            vin: "KNDC3DLC5N0000000", regId: "REG", model: "EV6",
+            accountId: UUID(), fuelType: .electric, generation: 3,
+            odometer: Distance(length: 1000, units: .miles),
+            vehicleKey: "vk"
+        )
+    }
+
+    @Test("Kia US climate always sends Fahrenheit (unit 1)")
+    @MainActor func testKiaUSClimateForcesFahrenheit() {
+        let client = makeKiaUSClient()
+        var options = ClimateOptions()
+        // Celsius preset — must be converted to F + unit 1.
+        options.temperature = Temperature(value: 22, units: .celsius)
+
+        let body = client.commandBody(for: .startClimate(options), vehicle: makeVehicle())
+        let remoteClimate = body["remoteClimate"] as? [String: Any]
+        let airTemp = remoteClimate?["airTemp"] as? [String: Any]
+        // 22°C ≈ 71.6°F → rounds to 72.
+        #expect(airTemp?["unit"] as? Int == 1)
+        #expect(airTemp?["value"] as? String == "72")
+    }
+
+    @Test("Kia US climate clamps out-of-range temps to LOW/HIGH")
+    @MainActor func testKiaUSClimateClampsTemps() {
+        let client = makeKiaUSClient()
+        let vehicle = makeVehicle()
+
+        var cold = ClimateOptions()
+        cold.temperature = Temperature(value: 55, units: .fahrenheit)
+        let coldBody = client.commandBody(for: .startClimate(cold), vehicle: vehicle)
+        let coldTemp = (coldBody["remoteClimate"] as? [String: Any])?["airTemp"] as? [String: Any]
+        #expect(coldTemp?["value"] as? String == "LOW")
+
+        var hot = ClimateOptions()
+        hot.temperature = Temperature(value: 90, units: .fahrenheit)
+        let hotBody = client.commandBody(for: .startClimate(hot), vehicle: vehicle)
+        let hotTemp = (hotBody["remoteClimate"] as? [String: Any])?["airTemp"] as? [String: Any]
+        #expect(hotTemp?["value"] as? String == "HIGH")
+    }
+
+    @Test("Kia US climate omits heatVentSeat when no seat is set")
+    @MainActor func testKiaUSClimateOmitsSeatsWhenUnset() {
+        let client = makeKiaUSClient()
+        let options = ClimateOptions() // all seats default 0, no ventilation
+        let body = client.commandBody(for: .startClimate(options), vehicle: makeVehicle())
+        let remoteClimate = body["remoteClimate"] as? [String: Any]
+        #expect(remoteClimate?["heatVentSeat"] == nil)
+    }
+
+    @Test("Kia US climate includes heatVentSeat when a seat is set")
+    @MainActor func testKiaUSClimateIncludesSeatsWhenSet() {
+        let client = makeKiaUSClient()
+        var options = ClimateOptions()
+        options.frontLeftSeat = 2 // driver seat heat level 2 (medium heat)
+        let body = client.commandBody(for: .startClimate(options), vehicle: makeVehicle())
+        let remoteClimate = body["remoteClimate"] as? [String: Any]
+        let seats = remoteClimate?["heatVentSeat"] as? [String: [String: Int]]
+        #expect(seats != nil)
+        // Medium heat → type 1 (heat), level 3, step 2.
+        #expect(seats?["driverSeat"]?["heatVentType"] == 1)
+        #expect(seats?["driverSeat"]?["heatVentLevel"] == 3)
+        #expect(seats?["driverSeat"]?["heatVentStep"] == 2)
+    }
 }
 
 // MARK: - JSON Format Documentation Tests
