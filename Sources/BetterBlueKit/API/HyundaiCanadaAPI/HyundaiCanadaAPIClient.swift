@@ -146,13 +146,24 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
             requestType: .fetchVehicleStatus,
             vin: vehicle.vin
         )
+        if !cached {
+            do {
+                _ = try parseCanadaResponse(primaryData, context: "status")
+            } catch let error as APIError where error.errorType == .concurrentRequest {
+                throw error
+            } catch {
+                BBLogger.debug(.api, "HyundaiCanada: realtime status error, falling back to cached payload: \(error)")
+            }
+        }
 
         let statusData = cached ? primaryData : try await fetchRealtimeStatusData(
             primaryData: primaryData,
             vehicle: vehicle,
             authToken: authToken
         )
-        let finalData = includeLocation ? await injectLocationCoordinates(into: statusData, vehicle: vehicle, authToken: authToken) : statusData
+        let finalData = includeLocation
+            ? try await injectLocationCoordinates(into: statusData, vehicle: vehicle, authToken: authToken)
+            : statusData
 
         do {
             return try parseCanadaVehicleStatusResponse(finalData, for: vehicle)
@@ -186,7 +197,7 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
         return finalData
     }
 
-    private func injectLocationCoordinates(into data: Data, vehicle: Vehicle, authToken: AuthToken) async -> Data {
+    private func injectLocationCoordinates(into data: Data, vehicle: Vehicle, authToken: AuthToken) async throws -> Data {
         do {
             let pAuth = try await fetchCommandAuthCode(authToken: authToken)
 
@@ -212,6 +223,8 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
             result["status"] = status
             finalJson["result"] = result
             return try JSONSerialization.data(withJSONObject: finalJson)
+        } catch let error as APIError where error.errorType == .concurrentRequest {
+            throw error
         } catch {
             BBLogger.debug(.api, "HyundaiCanada: failed injecting location: \(error)")
             return data
