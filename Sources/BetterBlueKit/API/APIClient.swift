@@ -69,7 +69,8 @@ public struct APIClientConfiguration {
             logSink: logSink,
             rememberMeToken: rememberMeToken,
             redactPII: redactPII,
-            deviceId: deviceId ?? self.deviceId
+            deviceId: deviceId ?? self.deviceId,
+            onRememberMeTokenRotated: onRememberMeTokenRotated
         )
     }
 }

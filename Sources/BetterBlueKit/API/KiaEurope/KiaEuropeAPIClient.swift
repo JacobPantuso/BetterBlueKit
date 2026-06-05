@@ -193,6 +193,11 @@ public final class KiaEuropeAPIClient: APIClientBase, APIClientProtocol {
     // MARK: - Commands
 
     public func sendCommand(for vehicle: Vehicle, command: VehicleCommand, authToken: AuthToken) async throws {
+        switch command {
+        case .flashLights, .honkAndFlash:
+            throw APIError(message: "Horn/lights command not supported for Kia Europe", apiName: apiName)
+        default: break
+        }
         let ccs2 = vehicle.marketOptions?.ccs2Supported ?? false
         let (path, body) = commandPathAndBody(for: command, ccs2: ccs2)
         let url = "\(baseURL)/api/\(ccs2 ? "v2" : "v1")"

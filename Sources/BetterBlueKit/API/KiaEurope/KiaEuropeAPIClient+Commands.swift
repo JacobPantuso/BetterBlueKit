@@ -52,6 +52,8 @@ extension KiaEuropeAPIClient {
                     ["targetSOClevel": acLevel, "plugType": 1]
                 ]
             ])
+        case .flashLights, .honkAndFlash:
+            return ("", [:])
         }
     }
 
