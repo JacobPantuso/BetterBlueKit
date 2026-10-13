@@ -301,8 +301,8 @@ struct RegionNotSupportedTests {
         #expect(client.apiName == "HyundaiCanada")
     }
 
-    @Test("Kia Canada throws region not supported")
-    @MainActor func testKiaCanadaNotSupported() async {
+    @Test("Kia Canada uses the Canada service at kiaconnect.ca")
+    @MainActor func testKiaCanadaUsesTheCanadaServiceAtKiaconnect() throws {
         let config = APIClientConfiguration(
             region: .canada,
             brand: .kia,
@@ -311,16 +311,11 @@ struct RegionNotSupportedTests {
             pin: "0000",
             accountId: UUID()
         )
-        let client = KiaCanadaAPIClient(configuration: config)
-
-        do {
-            _ = try await client.login()
-            #expect(Bool(false), "Should have thrown")
-        } catch let error as APIError {
-            #expect(error.errorType == .regionNotSupported)
-        } catch {
-            #expect(Bool(false), "Unexpected error type: \(error)")
-        }
+        let client = try #require(try createBetterBlueKitAPIClient(configuration: config) as? HyundaiCanadaAPIClient)
+        #expect(client.apiName == "KiaCanada")
+        #expect(client.apiHost == "kiaconnect.ca")
+        #expect(client.apiBaseURL == "https://kiaconnect.ca/tods/api")
+        #expect(supportedRegions(for: .kia).contains(.canada))
     }
 
     @Test("Kia Australia throws region not supported")

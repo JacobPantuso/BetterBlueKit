@@ -196,9 +196,16 @@ extension HyundaiCanadaAPIClient {
 
     func parseCanadaLocationResponse(_ data: Data) throws -> VehicleStatus.Location {
         let json = try parseCanadaResponse(data, context: "location")
-        guard let result = json["result"] as? [String: Any],
-              let coord = result["coord"] as? [String: Any] else {
+        guard let result = json["result"] as? [String: Any] else {
             throw APIError.logError("Invalid Canada location response", apiName: apiName)
+        }
+
+        let coord: [String: Any]? =
+            (result["gpsDetail"] as? [String: Any])?["coord"] as? [String: Any]
+            ?? result["coord"] as? [String: Any]
+
+        guard let coord else {
+            throw APIError.logError("Invalid Canada location response — no coord", apiName: apiName)
         }
 
         return VehicleStatus.Location(

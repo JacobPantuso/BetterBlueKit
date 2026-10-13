@@ -111,6 +111,9 @@ public protocol APIClientProtocol {
 
     /// Register device
     func registerDevice() async throws -> String?
+
+    /// Fetch only the vehicle's GPS location without a full status refresh.
+    func fetchLocationOnly(for vehicle: Vehicle, authToken: AuthToken) async throws -> VehicleStatus.Location
 }
 
 // MARK: - MFA Method
@@ -170,6 +173,10 @@ extension APIClientProtocol {
     /// default because otherwise FakeAPIClient throws error when calling this func in Account
     public func registerDevice() async throws -> String? {
         UUID().uuidString.uppercased()
+    }
+
+    public func fetchLocationOnly(for vehicle: Vehicle, authToken: AuthToken) async throws -> VehicleStatus.Location {
+        throw APIError(message: "Location-only fetch not supported for this API", apiName: "APIClient")
     }
 }
 

@@ -28,7 +28,14 @@ struct SVMTests {
             gpsDetail: gpsDetail,
             svmImage: "base64EncodedString",
             validAngleofView: [0.0, 90.0],
-            boundaryArea: [1, 2, 3]
+            boundaryArea: [1, 2, 3],
+            installAngle: nil,
+            sidemirrorOpen: nil,
+            doorOpen: nil,
+            trunkOpen: nil,
+            imageSize: nil,
+            offset: nil,
+            utcTime: nil
         )
 
         #expect(location.gpsDetail?.coordLat == 34.0)

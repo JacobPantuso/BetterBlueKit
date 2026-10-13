@@ -27,9 +27,9 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
     // reference, KiaUvoApiCA.py) gets the cookie and also reaches the
     // web-portal MFA endpoints. 2026.5.14 shipped this and worked;
     // 2026.5.15 reverted it and broke CA again — hence this is restored.
-    let userAgent =
-        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
-        + "(KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
+    let browserUserAgent =
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
     /// Stable per-account device ID. Hyundai Canada's anti-fraud
     /// challenge fires every time a "new device" logs in — using a
@@ -73,11 +73,14 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
     /// dance under the hood.
     var mfaCompletedAuthToken: AuthToken?
 
-    var baseURL: String { region.apiBaseURL(for: .hyundai) }
+    // Kia Canada runs the same `/tods/api` service as Hyundai Canada, at
+    // kiaconnect.ca instead of mybluelink.ca (the hyundai_kia_connect_api
+    // reference drives both with one class), so this client serves both brands.
+    var baseURL: String { region.apiBaseURL(for: brand == .kia ? .kia : .hyundai) }
     var apiBaseURL: String { "\(baseURL)/tods/api" }
-    var apiHost: String { "mybluelink.ca" }
+    var apiHost: String { brand == .kia ? "kiaconnect.ca" : "mybluelink.ca" }
 
-    public override var apiName: String { "HyundaiCanada" }
+    public override var apiName: String { brand == .kia ? "KiaCanada" : "HyundaiCanada" }
 
     // MARK: - APIClientProtocol Implementation
 
@@ -255,12 +258,12 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
             do {
                 // Append ?retry=N on retries so the HTTP log shows each attempt distinctly.
                 let url = attempt == 0
-                    ? "\(apiBaseURL)/fndmcr"
-                    : "\(apiBaseURL)/fndmcr?retry=\(attempt)"
+                    ? "\(apiBaseURL)/evc/fme"
+                    : "\(apiBaseURL)/evc/fme?retry=\(attempt)"
                 let (locationData, _, _) = try await performJSONRequest(
                     url: url,
                     method: .POST,
-                    headers: authorizedHeaders(authToken: authToken, vehicleId: vehicle.regId, pAuth: pAuth),
+                    headers: spaLocationHeaders(authToken: authToken, vehicleId: vehicle.regId, pAuth: pAuth),
                     body: ["pin": pin],
                     requestType: .fetchVehicleStatus,
                     vin: vehicle.vin
@@ -293,42 +296,55 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
         nil
     }
 
+    public func fetchLocationOnly(for vehicle: Vehicle, authToken: AuthToken) async throws -> VehicleStatus.Location {
+        _ = try await ensureCloudFlareCookie()
+        let pAuth = try await fetchCommandAuthCode(authToken: authToken)
+        return try await fetchLocationWithRetry(vehicle: vehicle, authToken: authToken, pAuth: pAuth)
+    }
+
     public func fetchSurroundView(for vehicle: Vehicle, authToken: AuthToken, cached: Bool = true) async throws -> SVMResult {
         _ = try await ensureCloudFlareCookie()
 
-        if !cached {
-            let authCode = try await fetchCommandAuthCode(authToken: authToken)
-
-            let (data, _, response) = try await performJSONRequest(
-                url: "\(apiBaseURL)/rfc/fndmcrsvm",
-                method: .POST,
-                headers: authorizedHeaders(authToken: authToken, vehicleId: vehicle.regId, pAuth: authCode),
-                body: ["vehicleId": vehicle.regId],
-                requestType: .sendCommand
-            )
-
-            try validateCommandResponse(data, context: "surround view request")
-
-            let responseHeaders = extractResponseHeaders(from: response)
-            guard let transactionId = extractTransactionId(from: responseHeaders) else {
-                throw APIError.logError("Canada SVM missing TransactionId header", apiName: apiName)
-            }
-
-            // Poll for completion — wait 10s before first poll since SVM capture takes ~2 minutes.
-            // On timeout, log and fall through to fetch whatever result exists rather than failing hard.
-            do {
-                try await pollForCommandCompletion(
-                    vehicle: vehicle,
-                    authToken: authToken,
-                    authCode: authCode,
-                    transactionId: transactionId,
-                    initialDelayNanoseconds: 10_000_000_000
-                )
-            } catch {
-                BBLogger.debug(.api, "HyundaiCanada: SVM poll ended early, attempting to fetch last result anyway: \(error)")
-            }
+        guard !cached else {
+            return try await fetchLastSurroundView(vehicle: vehicle, authToken: authToken)
         }
 
+        // The newest capture already on the server, so the poll below can tell
+        // a fresh one from it.
+        let previousTime = (try? await fetchLastSurroundView(vehicle: vehicle, authToken: authToken))?
+            .svmLocations?.first?.utcTime
+
+        // Sent exactly as the MyHyundai app sends it (Proxyman, 2026-09-26):
+        // SPA headers, no PIN, no pauth, empty body. Treating it as a
+        // PIN-authorised remote command — vrfypin, a Pauth header and a
+        // {"vehicleId"} body — is what the server rejected with error 6459.
+        let (data, _, _) = try await performJSONRequest(
+            url: "\(apiBaseURL)/rfc/fndmcrsvm",
+            method: .POST,
+            headers: spaLocationHeaders(authToken: authToken, vehicleId: vehicle.regId, pAuth: nil),
+            requestType: .sendCommand,
+            vin: vehicle.vin
+        )
+        try validateCommandResponse(data, context: "surround view request")
+
+        // The response carries no TransactionId to poll /rmtsts with: the app
+        // is told by push when the car has uploaded, which a third-party client
+        // can't receive. So poll the cloud-side result — cheap, it doesn't wake
+        // the car the way rltmvhcsts does — until a capture newer than the one
+        // above appears. The car typically takes about two minutes.
+        try await Task.sleep(nanoseconds: 20_000_000_000)
+        for _ in 0..<28 { // 20 s + 28 × 10 s ≈ 5 minutes
+            if let latest = try? await fetchLastSurroundView(vehicle: vehicle, authToken: authToken),
+               let time = latest.svmLocations?.first?.utcTime,
+               time != previousTime {
+                return latest
+            }
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+        }
+        throw APIError.logError("Surround view capture timed out after 5 minutes", apiName: apiName)
+    }
+
+    private func fetchLastSurroundView(vehicle: Vehicle, authToken: AuthToken) async throws -> SVMResult {
         let (imgData, _, _) = try await performJSONRequest(
             url: "\(apiBaseURL)/rfc/lastmcrsvm",
             method: .POST,
@@ -336,7 +352,6 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
             body: ["vehicleId": vehicle.regId],
             requestType: .fetchVehicleStatus
         )
-
         return try parseSurroundViewResponse(imgData)
     }
 

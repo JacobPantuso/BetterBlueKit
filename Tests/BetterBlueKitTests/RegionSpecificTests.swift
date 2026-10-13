@@ -430,7 +430,6 @@ struct RegionSpecificTests {
     @Test("API client creation for unsupported regions throws")
     @MainActor func testAPIClientCreationForUnsupportedRegions() {
         let unsupportedConfigs: [(Region, Brand)] = [
-            (.canada, .kia),
             (.australia, .hyundai),
             (.australia, .kia)
         ]

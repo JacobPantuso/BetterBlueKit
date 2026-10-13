@@ -17,13 +17,10 @@ extension HyundaiCanadaAPIClient {
             "client_secret": clientSecret,
             "Host": apiHost,
             "deviceid": deviceId,
-            // "CWP" (Connected Web Portal), not "SPA" (native app): the
-            // CA MFA endpoints only honor the web-portal client. See the
-            // userAgent note in HyundaiCanadaAPIClient.
             "from": "CWP",
             "language": "0",
             "offset": timezoneOffsetHeader,
-            "User-Agent": userAgent,
+            "User-Agent": browserUserAgent,
             "Content-Type": "application/json",
             "Accept": "application/json",
             "origin": "https://\(apiHost)",
@@ -63,6 +60,36 @@ extension HyundaiCanadaAPIClient {
         return result
     }
 
+    func spaLocationHeaders(
+        authToken: AuthToken,
+        vehicleId: String,
+        pAuth: String?
+    ) -> [String: String] {
+        var result: [String: String] = [
+            "client_id": clientId,
+            "client_secret": clientSecret,
+            "Host": "\(apiHost):443",
+            "from": "SPA",
+            "brand": "H",
+            "language": "0",
+            "offset": timezoneOffsetHeader,
+            "User-Agent": "MyHyundai/2.0.47 (iPhone; iOS 27.0; Scale/3.00)",
+            "Content-Type": "application/json",
+            "Accept": "*/*",
+            "accessToken": authToken.accessToken,
+            "vehicleId": vehicleId,
+        ]
+        // The surround-view request carries no pauth at all — see
+        // `fetchSurroundView`.
+        if let pAuth {
+            result["pauth"] = pAuth
+        }
+        if let cookie = cloudFlareCookie {
+            result["Cookie"] = cookie
+        }
+        return result
+    }
+
     // MARK: - Cloudflare Cookie
 
     /// Attempts to fetch the Cloudflare `__cf_bm` bot-management cookie by
@@ -72,6 +99,14 @@ extension HyundaiCanadaAPIClient {
     func fetchCloudFlareCookie() async throws -> String? {
         let loginURL = URL(string: "https://\(apiHost)/login")!
 
+        // Check HTTPCookieStorage first — a WKWebView challenge solver in the
+        // host app may have already deposited valid cookies there.
+        let preExisting = cfCookieString(from: HTTPCookieStorage.shared.cookies(for: loginURL) ?? [])
+        if let preExisting {
+            BBLogger.info(.auth, "HyundaiCanada: found pre-existing CF cookies in shared storage")
+            return preExisting
+        }
+
         let (_, response) = try await performRequest(
             url: loginURL.absoluteString,
             method: .GET,
@@ -80,25 +115,30 @@ extension HyundaiCanadaAPIClient {
         )
 
         // Primary: parse Set-Cookie headers from the final response.
-        if let cookie = HTTPCookie.cookies(
+        let responseCookies = HTTPCookie.cookies(
             withResponseHeaderFields: extractResponseHeaders(from: response),
             for: loginURL
-        ).first(where: { $0.name.lowercased() == "__cf_bm" }) {
-            return "__cf_bm=\(cookie.value)"
+        )
+        if let result = cfCookieString(from: responseCookies) {
+            return result
         }
 
         // Fallback: URLSession stores cookies from all responses in the redirect
         // chain into HTTPCookieStorage.shared; check there too.
-        if let cookie = HTTPCookieStorage.shared.cookies(for: loginURL)?
-            .first(where: { $0.name.lowercased() == "__cf_bm" }) {
-            return "__cf_bm=\(cookie.value)"
+        if let result = cfCookieString(from: HTTPCookieStorage.shared.cookies(for: loginURL) ?? []) {
+            return result
         }
 
-        // Cookie not present — Cloudflare may be enforcing via JS challenge only.
-        // Log a warning and let the caller proceed; the POST login will surface
-        // any actual rejection from the server.
-        BBLogger.warning(.auth, "HyundaiCanada: __cf_bm cookie not found in login page response — proceeding without it")
+        BBLogger.warning(.auth, "HyundaiCanada: CF cookies not found in login page response — proceeding without them")
         return nil
+    }
+
+    private static let cfCookieNames: Set<String> = ["__cf_bm", "cf_clearance"]
+
+    private func cfCookieString(from cookies: [HTTPCookie]) -> String? {
+        let matched = cookies.filter { Self.cfCookieNames.contains($0.name.lowercased()) }
+        guard !matched.isEmpty else { return nil }
+        return matched.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
     }
 
     // MARK: - Shared Response Parser
