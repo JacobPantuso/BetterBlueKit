@@ -16,7 +16,10 @@ public enum SensitiveDataRedactor {
         let tokenKeys = [
             "access_token", "refresh_token", "accessToken", "refreshToken",
             "serializedAuthToken", "rememberMeToken", "Accesstoken", "Pauth",
-            "TransactionId", "Cookie", "__cf_bm", "otpKey", "otpValidationKey"
+            "TransactionId", "Cookie", "__cf_bm", "otpKey", "otpValidationKey",
+            // EU OneApp/CCI token set (login + token-refresh bodies)
+            "exchangeableAccessToken", "exchangeableRefreshToken",
+            "nonCcsToken", "nonCcsRefreshToken", "idToken", "ccsAccessToken"
         ].joined(separator: "|")
 
         let emailKeys = [
@@ -31,8 +34,13 @@ public enum SensitiveDataRedactor {
         let idKeys = [
             "accountId", "account_id", "userId", "user_id",
             "memberId", "member_id", "idmId", "nadid",
-            "billingAccountNumber", "enrollmentId", "enrollmentCode",
-            "deviceKey", "deviceid", "clientuuid"
+            "billingAccountNumber", "enrollmentId", "enrollmentCode"
+        ].joined(separator: "|")
+
+        // Device identifiers get partial masking instead of the blanket
+        // redaction above — see the rule below for why.
+        let deviceKeys = [
+            "deviceid", "deviceId", "deviceKey", "clientuuid"
         ].joined(separator: "|")
 
         return [
@@ -43,11 +51,33 @@ public enum SensitiveDataRedactor {
             // Bearer tokens
             (#"Bearer\s+[A-Za-z0-9._-]+"#,
              "Bearer [REDACTED]"),
+            // Form-encoded credentials — the EU IDPConnect signin POSTs
+            // application/x-www-form-urlencoded, which the JSON rules
+            // never match. Case-sensitive, so `encryptedPassword=true`
+            // (a flag, not a secret) is left alone.
+            (#"(?:^|(?<=&))(password|username)=[^&]*"#,
+             "$1=[REDACTED]"),
+            // OAuth authorization codes riding in a URL query (the EU CCI
+            // token exchange puts the signin code in `?code=…`).
+            (#"(?<=[?&])code=[^&\s"']+"#,
+             "code=[REDACTED]"),
             // Token/secret fields (handles escaped quotes)
             (#""(\#(tokenKeys))"\s*:\s*"(?:[^"\\]|\\.)*""#,
              "\"$1\":\"[REDACTED]\""),
-            // Latitude/longitude coordinates
-            (#""(latitude|longitude|lat|lng|lon)"\s*:\s*[-+]?\d+\.?\d*"#,
+            // Latitude/longitude coordinates. Two spellings are accepted:
+            // the bare keys, and any camelCase key ENDING in one of them —
+            // the surround-view payload reports position as
+            // `gpsDetail.coordLat` / `coordLon`, which the bare-key rule
+            // alone let through into persisted logs and debug exports.
+            // Requiring a capital on the prefixed form keeps innocent words
+            // like "flat" and "gallon" from matching.
+            //
+            // The value alternation is quoted-OR-bare rather than a pair of
+            // optional quotes: independent `"?` would happily match the
+            // opening quote of `"43.6abc"` and stop at the digits, leaving
+            // the tail behind as `"[REDACTED]"abc"` — malformed JSON in a
+            // persisted log and in every debug export built from it.
+            (#""((?:latitude|longitude|lat|lng|lon)|\w+(?:Latitude|Longitude|Lat|Lng|Lon))"\s*:\s*(?:"[-+]?\d+\.?\d*"|[-+]?\d+\.?\d*)"#,
              "\"$1\":\"[REDACTED]\""),
             // Coordinate pairs in arrays or objects
             (#"[-+]?\d{1,3}\.\d{3,10}\s*,\s*[-+]?\d{1,3}\.\d{3,10}"#,
@@ -64,8 +94,26 @@ public enum SensitiveDataRedactor {
             // Phone numbers
             (#""(\#(phoneKeys))"\s*:\s*"[^"]*""#,
              "\"$1\":\"[REDACTED]\""),
-            // Account/user/device IDs
+            // Account/user IDs
             (#""(\#(idKeys))"\s*:\s*"[^"]*""#,
+             "\"$1\":\"[REDACTED]\""),
+            // Device identifiers — partially masked rather than blanked, so a
+            // reader can tell whether the id CHANGED between requests. A
+            // rotating device id is the signature of the Hyundai Canada MFA
+            // loop (BetterBlue#95): that region has no refresh endpoint, so
+            // the `deviceid` header is the only thing letting the backend
+            // recognize an install and skip the OTP challenge. Fully redacting
+            // it made "stable" and "rotating every session" look identical in
+            // a bug report. Same trade-off as the VIN rule below: a device id
+            // is an opaque installation identifier, not a credential, and is
+            // useless without the password/tokens that stay redacted.
+            // Keeps the first 8 and last 4 characters.
+            (#""(\#(deviceKeys))"\s*:\s*"([A-Za-z0-9]{8})[A-Za-z0-9._-]*([A-Za-z0-9]{4})""#,
+             "\"$1\":\"$2…$3\""),
+            // Fallback: a device id too short to partially mask is still
+            // blanked. The `…` exclusion keeps this from re-redacting a value
+            // the rule above already masked.
+            (#""(\#(deviceKeys))"\s*:\s*"[^"…]*""#,
              "\"$1\":\"[REDACTED]\""),
             // Physical address fields
             (#""(street|postalCode)"\s*:\s*"[^"]*""#,
@@ -94,13 +142,79 @@ public enum SensitiveDataRedactor {
         return redacted
     }
 
+    /// Replaces JSON string values longer than `threshold` with a note
+    /// of their length, leaving the surrounding structure intact.
+    ///
+    /// Surround-view responses carry megabytes of base64 JPEG in a single
+    /// field. HTTP logs are persisted to SwiftData, synced, and bundled
+    /// into debug exports, so storing that verbatim would bloat all three
+    /// — and the imagery tells a reader nothing the metadata doesn't.
+    public static func elideOversizedValues(_ text: String?, threshold: Int = 4096) -> String? {
+        guard let text else { return nil }
+        guard text.utf8.count > threshold else { return text }
+
+        let quote = UInt8(ascii: "\"")
+        let backslash = UInt8(ascii: "\\")
+        let bytes = Array(text.utf8)
+
+        var output: [UInt8] = []
+        output.reserveCapacity(bytes.count / 2)
+
+        var index = 0
+        while index < bytes.count {
+            guard bytes[index] == quote else {
+                output.append(bytes[index])
+                index += 1
+                continue
+            }
+
+            // Walk to the closing quote, honoring backslash escapes.
+            var cursor = index + 1
+            var escaped = false
+            while cursor < bytes.count {
+                let byte = bytes[cursor]
+                if escaped {
+                    escaped = false
+                } else if byte == backslash {
+                    escaped = true
+                } else if byte == quote {
+                    break
+                }
+                cursor += 1
+            }
+
+            guard cursor < bytes.count else {
+                // Unterminated string — copy the remainder verbatim.
+                output.append(contentsOf: bytes[index...])
+                break
+            }
+
+            let length = cursor - index - 1
+            if length > threshold {
+                output.append(contentsOf: Array("\"[\(length) characters elided]\"".utf8))
+            } else {
+                output.append(contentsOf: bytes[index ... cursor])
+            }
+            index = cursor + 1
+        }
+
+        // Cutting only at quote bytes keeps multi-byte scalars intact, so
+        // this should never fail. If it somehow does, drop the body: the
+        // obvious fallback — returning `text` — would log the exact
+        // megabytes of base64 this function exists to remove.
+        return String(bytes: output, encoding: .utf8) ?? "[body omitted: could not be decoded]"
+    }
+
     /// Redacts sensitive HTTP headers
     public static func redactHeaders(_ headers: [String: String]) -> [String: String] {
         // Keys that should always be fully redacted (case-insensitive match)
         let sensitiveKeys: Set<String> = [
             "cookie", "set-cookie", "__cf_bm", "transactionid",
             "password", "pin", "bluelinkservicepin",
-            "clientsecret", "client_secret", "secretkey"
+            "clientsecret", "client_secret", "secretkey",
+            // The EU CCI signin answers with a 302 whose Location query
+            // carries the live OAuth authorization code.
+            "location"
         ]
 
         var redactedHeaders = headers

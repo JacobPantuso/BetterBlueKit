@@ -12,7 +12,26 @@ import Foundation
 public enum HTTPRequestType: String, CaseIterable, Codable, Sendable {
     case login, fetchVehicles, fetchVehicleStatus, sendCommand
     case sendMFA, verifyMFA
-    case fetchEVTripDetails
+    case fetchEVTripSummary, fetchEVTripInfo
+    case requestSurroundView, fetchSurroundView
+
+    /// Logs are persisted with the raw value, so renaming a case orphans
+    /// existing rows: decoding "fetchEVTripDetails" (the pre-rename name of
+    /// `fetchEVTripSummary`) would otherwise throw and take down whatever
+    /// fetched the row — the HTTP log list or a debug export.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        if let value = HTTPRequestType(rawValue: raw) {
+            self = value
+        } else if raw == "fetchEVTripDetails" {
+            self = .fetchEVTripSummary
+        } else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Unknown HTTPRequestType: \(raw)"
+            ))
+        }
+    }
 
     public var displayName: String {
         switch self {
@@ -22,7 +41,10 @@ public enum HTTPRequestType: String, CaseIterable, Codable, Sendable {
         case .sendCommand: "Send Command"
         case .sendMFA: "Send MFA"
         case .verifyMFA: "Verify MFA"
-        case .fetchEVTripDetails: "Fetch Trip Details"
+        case .fetchEVTripSummary: "Fetch Trip Summary"
+        case .fetchEVTripInfo: "Fetch Trip Info"
+        case .requestSurroundView: "Request Surround View"
+        case .fetchSurroundView: "Fetch Surround View"
         }
     }
 }

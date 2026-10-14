@@ -292,10 +292,6 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
         )
     }
 
-    public func fetchEVTripDetails(for vehicle: Vehicle, authToken: AuthToken) async throws -> [EVTripDetail]? {
-        nil
-    }
-
     public func fetchLocationOnly(for vehicle: Vehicle, authToken: AuthToken) async throws -> VehicleStatus.Location {
         _ = try await ensureCloudFlareCookie()
         let pAuth = try await fetchCommandAuthCode(authToken: authToken)

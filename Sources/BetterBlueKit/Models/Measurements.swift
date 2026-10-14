@@ -35,6 +35,10 @@ public struct Distance: Codable, Hashable, Sendable {
             let convertedLength = convert(length, to: targetUnits)
 
             let formatter = NumberFormatter()
+            // .decimal applies the current locale's grouping separator (e.g. "19,500"
+            // in en-US, "19.500" in de-DE, "19 500" in fr-FR). The default .none style
+            // applies no grouping, so a 19,500 mi odometer rendered as "19500".
+            formatter.numberStyle = .decimal
             formatter.maximumFractionDigits = 0
             let formattedNumber = formatter.string(from: NSNumber(value: convertedLength)) ?? "0"
 
@@ -70,7 +74,7 @@ public struct Temperature: Codable, Hashable, Sendable {
     public enum Units: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
         case celsius, fahrenheit
 
-        public init(_ number: Int?) { self = number == 0 ? .fahrenheit : .celsius }
+        public init(_ number: Int?) { self = number == 1 ? .fahrenheit : .celsius }
 
         public func integer() -> Int { self == .fahrenheit ? 1 : 0 }
         public var id: String { rawValue }
@@ -86,9 +90,24 @@ public struct Temperature: Codable, Hashable, Sendable {
         public func format(_ temperature: Double, to targetUnits: Units) -> String {
             let convertedTemperature = self.convert(temperature, to: targetUnits)
 
+            // Celsius supports half-degree steps: snap to the 0.5°C grid and
+            // show up to one decimal ("22.5°C", "22°C"). Fahrenheit is
+            // whole-degree only.
             let formatter = NumberFormatter()
-            formatter.maximumFractionDigits = 0
-            let formattedNumber = formatter.string(from: NSNumber(value: convertedTemperature)) ?? "0"
+            // .decimal makes the decimal separator locale-correct (half-degree Celsius
+            // shows "22,5°C" in de-DE, not "22.5°C"); the per-unit maximumFractionDigits
+            // set below still applies.
+            formatter.numberStyle = .decimal
+            let displayValue: Double
+            switch targetUnits {
+            case .celsius:
+                formatter.maximumFractionDigits = 1
+                displayValue = (convertedTemperature * 2).rounded() / 2
+            case .fahrenheit:
+                formatter.maximumFractionDigits = 0
+                displayValue = convertedTemperature
+            }
+            let formattedNumber = formatter.string(from: NSNumber(value: displayValue)) ?? "0"
 
             return "\(formattedNumber)\(targetUnits.symbol)"
         }
@@ -184,16 +203,47 @@ public struct Temperature: Codable, Hashable, Sendable {
     }
 
     /// Encode a 0.5°C-grid Celsius value as the HEX form the older
-    /// Hyundai/Kia APIs (USA + Canada non-CCS2) expect — e.g. 17.0°C
+    /// Hyundai/Kia APIs (USA + Hyundai EU legacy) expect — e.g. 17.0°C
     /// → "06H", 22.0°C → "10H", 27.0°C → "1AH". Inverse of
-    /// `parseAirTempFromHEX`. Clamped to the [14.0°C, 31.5°C] range
-    /// the HEX scheme can represent (32 values, 0x00–0x1F).
+    /// `parseAirTempFromHEX`. Clamped to the [14.0°C, 29.5°C] window
+    /// (0x00–0x1F). Hyundai Canada uses the model-year-aware
+    /// `encodeCanadaAirTempToHEX` instead.
     public static func encodeAirTempToHEX(celsiusValue celsius: Double) -> String {
         let snapped = snapToHalfDegreeCelsius(celsius)
         // tempC = (28 + index) * 0.5  →  index = tempC * 2 - 28
         let index = Int((snapped * 2).rounded()) - 28
         let clamped = max(0, min(31, index))
         return String(format: "%02XH", clamped)
+    }
+
+    // MARK: - Hyundai Canada HEX scale (model-year dependent)
+
+    /// Hyundai Canada's HVAC HEX scale starts at 14.0°C for MY2020+
+    /// vehicles and 16.0°C for older ones; both run in 0.5°C steps up
+    /// to 31.5°C. Ports hyundai_kia_connect_api's
+    /// `temperature_range_c_new` / `temperature_range_c_old` split
+    /// (`temperature_range_model_year = 2020`). A nil/unknown model
+    /// year uses the pre-2020 scale, matching upstream's default.
+    static func canadaHVACScaleBase(modelYear: Int?) -> Double {
+        (modelYear ?? 0) >= 2020 ? 14.0 : 16.0
+    }
+
+    /// Encode a Celsius value for Hyundai Canada, honoring the
+    /// model-year scale split. MY2020+ spans indexes 0–35 (14.0–31.5°C,
+    /// up to "23H"); older spans 0–31 (16.0–31.5°C).
+    public static func encodeCanadaAirTempToHEX(celsiusValue celsius: Double, modelYear: Int?) -> String {
+        let base = canadaHVACScaleBase(modelYear: modelYear)
+        let maxIndex = base == 14.0 ? 35 : 31
+        let snapped = snapToHalfDegreeCelsius(celsius)
+        let index = Int((snapped * 2).rounded()) - Int(base * 2)
+        let clamped = max(0, min(maxIndex, index))
+        return String(format: "%02XH", clamped)
+    }
+
+    /// Decode a Hyundai Canada HEX index back to Celsius, honoring the
+    /// model-year scale split. Inverse of `encodeCanadaAirTempToHEX`.
+    public static func decodeCanadaAirTempHEX(index: Int, modelYear: Int?) -> Double {
+        canadaHVACScaleBase(modelYear: modelYear) + Double(index) * 0.5
     }
 
     // MARK: - Lookup tables

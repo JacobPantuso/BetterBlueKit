@@ -1,56 +1,24 @@
 //
-//  KiaEuropeAPIClient+Headers.swift
+//  APIClientBase+EuropeCrypto.swift
 //  BetterBlueKit
 //
-//  Header builders, the stamp signature helper, and the small chunk of
-//  RSA / encoding plumbing the headless signin flow needs. Lifted into
-//  a sibling extension so the main client file stays under SwiftLint's
-//  250-line type-body cap.
+//  RSA + encoding plumbing for the European IDPConnect signin, shared by
+//  the Kia and Hyundai EU clients (moved up from the Kia-only extension
+//  when the OneApp/CCI flow made it brand-independent).
 //
 
-import CryptoKit
 import Foundation
 import Security
 
-extension KiaEuropeAPIClient {
+extension APIClientBase {
 
-    // MARK: - Header builders
-
-    func authorizedHeaders(authToken: AuthToken, ccs2: Bool = false) -> [String: String] {
-        [
-            "Authorization": "Bearer \(authToken.accessToken)",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "okhttp/3.14.9",
-            "ccsp-service-id": Self.clientId,
-            "ccsp-application-id": Self.appId,
-            "ccsp-device-id": configuration.deviceId ?? "",
-            "Ccuccs2protocolsupport": ccs2 ? "1" : "0",
-            "Host": apiHost,
-            "Connection": "Keep-Alive",
-            "Accept-Encoding": "gzip",
-            // Fresh HMAC per request — Stamp is an `<appId>:<ISO8601>` signature
-            // and the server appears to validate the timestamp window.
-            "Stamp": generateStamp()
-        ]
-    }
-
-    func commandHeaders(authToken: AuthToken, ccs2: Bool = false) -> [String: String] {
-        var result = authorizedHeaders(authToken: authToken, ccs2: ccs2)
-        result["Authorization"] = "Bearer \(commandToken)"
-        result["AuthorizationCCSP"] = "Bearer \(commandToken)"
-        return result
-    }
-
-    /// HMAC-SHA256 of `<appId>:<ISO8601 timestamp>` keyed by the first
-    /// 32 bytes of the base64-decoded `authCfb`, base64-encoded.
-    func generateStamp() -> String {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        let message = "\(Self.appId):\(timestamp)"
-        guard let cfbData = Data(base64Encoded: Self.authCfb) else { return message }
-        let key = SymmetricKey(data: cfbData.prefix(32))
-        let signature = HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: key)
-        return Data(signature).base64EncodedString()
+    /// The `_CCS_APP_AOS` suffix is what gets past Cloudflare on
+    /// `idpconnect-eu.{kia,hyundai}.com` — without it, the authorize
+    /// endpoint returns 400. Discovered in hyundai_kia_connect_api PR #1123.
+    static var euMobileUserAgent: String {
+        "Mozilla/5.0 (Linux; Android 4.1.1; Galaxy Nexus Build/JRO03C) " +
+        "AppleWebKit/535.19 (KHTML, like Gecko) " +
+        "Chrome/18.0.1025.166 Mobile Safari/535.19_CCS_APP_AOS"
     }
 
     // MARK: - RSA / encoding helpers (used by signin)

@@ -145,7 +145,11 @@ extension HyundaiCanadaAPIClient {
                 if topLevel == "F" { return .fahrenheit }
                 if topLevel == "C" { return .celsius }
             }
-            return Temperature.Units(unitField)
+            // Hyundai Canada's fallback code is the reverse of every other
+            // region's (0 here means Fahrenheit), so it's mapped here rather
+            // than through the shared `Temperature.Units(_:)`, which Europe
+            // and the US rely on.
+            return unitField == 0 ? .fahrenheit : .celsius
         }()
 
         // "HI" / "LOW" string constants flow through unchanged.

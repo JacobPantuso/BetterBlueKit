@@ -11,27 +11,8 @@ import Foundation
 
 extension KiaEuropeAPIClient {
 
-    package func parseAuthToken(from data: Data, isRefresh: Bool) throws -> AuthToken {
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let accessToken = json["access_token"] as? String,
-              let expiresIn = json["expires_in"] as? Int else {
-            throw APIError(
-                message: "Failed to parse AuthToken response",
-                apiName: apiName,
-                errorType: .invalidCredentials
-            )
-        }
-
-        let refreshToken: String = isRefresh
-            ? (json["refresh_token"] as? String ?? configuration.refreshToken ?? "")
-            : (configuration.refreshToken ?? "")
-
-        return AuthToken(
-            accessToken: accessToken,
-            refreshToken: refreshToken,
-            expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn))
-        )
-    }
+    // Auth-token parsing moved to the shared
+    // `EuropeCCSPClient.parseLegacyAuthToken(from:)`.
 
     package func parseVehiclesResponse(_ data: Data) throws -> [Vehicle] {
         guard
@@ -49,15 +30,9 @@ extension KiaEuropeAPIClient {
                     ?? vehicleData["vehicleName"] as? String
             else { return nil }
 
-            let fuelKindCode = vehicleData["type"] as? String ?? ""
-            let fuelType: FuelType =
-                switch fuelKindCode {
-                case "E", "EV": .electric
-                case "P", "PE": .phev
-                default: .gas
-                }
+            let fuelType = Self.parseEuropeFuelType(vehicleData["type"] as? String ?? "")
             let generation = 2
-            let ccs2: Bool = getBoolFromJson(from: vehicleData, key: "ccuCCS2ProtocolSupport")
+            let ccs2 = Self.parseCCS2Flag(vehicleData["ccuCCS2ProtocolSupport"])
 
             return Vehicle(
                 vin: vin,
@@ -95,9 +70,20 @@ extension KiaEuropeAPIClient {
         let pathMap = HyEuResponseKeyPathMap(profile: ccs2 ? .ccs2 : .legacy)
         let vehicleData = getChildFromJson(from: resMsg, key: pathMap[.vehicleState])
 
-        let syncDate = Date(
-            timeIntervalSince1970: getDoubleFromJson(from: resMsg, key: pathMap[.syncDate]) / 1000
-        )
+        // CCS2 lastUpdateTime is numeric epoch milliseconds; legacy delivers
+        // a "yyyyMMddHHmmss" local-time string. Treating the latter as epoch
+        // millis produced year-2612 sync dates.
+        let syncDate: Date
+        if let dateString = getAnyFromJson(from: resMsg, key: pathMap[.syncDate]) as? String,
+           let parsed = BluelinkDateParser.parse(
+               dateString, timeZone: TimeZone(identifier: "Europe/Berlin")
+           ) {
+            syncDate = parsed
+        } else {
+            syncDate = Date(
+                timeIntervalSince1970: getDoubleFromJson(from: resMsg, key: pathMap[.syncDate]) / 1000
+            )
+        }
         let odo = Distance(
             length: getDoubleFromJson(from: vehicleData, key: pathMap[.odo]),
             units: Distance.Units(1)
@@ -139,8 +125,11 @@ extension KiaEuropeAPIClient {
             targetDC = getDoubleFromJson(from: vehicleState, key: pathMap[.targetDC])
             isCharging = remainChargeTime > 0
         } else {
-            let targetSocList = getChildFromJson(from: vehicleState,
-                                                 key: pathMap[.targetSocList]) as? [[String: Any]] ?? []
+            // targetSocList resolves to an ARRAY leaf; getChildFromJson only returns
+            // dictionaries, so the cast failed and AC/DC targets were always empty.
+            // Read via getAnyFromJson (matches the Hyundai EU sibling).
+            let targetSocList = getAnyFromJson(from: vehicleState,
+                                               key: pathMap[.targetSocList]) as? [[String: Any]] ?? []
             for target in targetSocList {
                 if let plugType = target["plugType"] as? Int,
                    let soc = target["targetSOClevel"] as? Double {
@@ -220,30 +209,40 @@ extension KiaEuropeAPIClient {
 
     private func parseLocation(from vehicleState: [String: Any], park: [String: Any], pathMap: HyEuResponseKeyPathMap)
         -> VehicleStatus.Location {
-        let locationDateString = getAnyFromJson(
-            from: vehicleState, key: pathMap[.locationDate]) as? String ?? "20000101010000.000"
-        let parkDateString = getAnyFromJson(
-            from: park, key: pathMap[.parkDate]) as? String ?? "20000101020000"
+        // BluelinkDateParser tries both timestamp shapes the backend uses
+        // ("yyyyMMddHHmmss" with and without ".SSS"); the old single-format
+        // parse failed on legacy times, which forced the park branch even
+        // when the park response had no usable data. Legacy times are local
+        // (vehicle) time, CCS2 are UTC — mirrors the Hyundai EU sibling.
+        let timeZone = pathMap.apiProfile == .legacy ? TimeZone(identifier: "Europe/Berlin") : TimeZone.gmt
+        let locationDate = BluelinkDateParser.parse(
+            getAnyFromJson(from: vehicleState, key: pathMap[.locationDate]) as? String, timeZone: timeZone
+        )
+        let parkDate = BluelinkDateParser.parse(
+            getAnyFromJson(from: park, key: pathMap[.parkDate]) as? String, timeZone: timeZone
+        )
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.timeZone = TimeZone.current
-        dateFormatter.dateFormat = "yyyyMMddHHmmss"
-        let parkDate = dateFormatter.date(from: parkDateString) ?? Date(timeIntervalSince1970: 0)
-
-        dateFormatter.timeZone = TimeZone.gmt
-        dateFormatter.dateFormat = "yyyyMMddHHmmss.SSS"
-        let locationDate = dateFormatter.date(from: locationDateString) ?? Date(timeIntervalSince1970: 0)
-
-        if locationDate.compare(parkDate).rawValue <= 0 {
-            return VehicleStatus.Location(
-                latitude: getDoubleFromJson(from: park, key: pathMap[.parkLat]),
-                longitude: getDoubleFromJson(from: park, key: pathMap[.parkLon])
-            )
-        }
-        return VehicleStatus.Location(
+        let parkLocation = VehicleStatus.Location(
+            latitude: getDoubleFromJson(from: park, key: pathMap[.parkLat]),
+            longitude: getDoubleFromJson(from: park, key: pathMap[.parkLon])
+        )
+        let statusLocation = VehicleStatus.Location(
             latitude: getDoubleFromJson(from: vehicleState, key: pathMap[.locationLat]),
             longitude: getDoubleFromJson(from: vehicleState, key: pathMap[.locationLon])
         )
+
+        // Prefer the park endpoint when it has coordinates (hasCoordinates
+        // treats the (0,0) "no fix" sentinel as absent) and is at least as
+        // recent as the (often stale) status-embedded location; fall back
+        // to whichever source actually has coordinates.
+        if let parkDate, let locationDate, locationDate.compare(parkDate).rawValue <= 0,
+           parkLocation.hasCoordinates {
+            return parkLocation
+        }
+        if statusLocation.hasCoordinates {
+            return statusLocation
+        }
+        return parkLocation.hasCoordinates ? parkLocation : statusLocation
     }
 
     private func parseTirePressure(from vehicleState: [String: Any], pathMap: HyEuResponseKeyPathMap)
@@ -305,15 +304,29 @@ extension KiaEuropeAPIClient {
     }
 
     private func getAnyFromJson(from data: [String: Any], key keyString: String?) -> Any? {
-        if keyString == nil || keyString!.isEmpty { return nil }
-        var current = data
-        for key in keyString!.split(separator: ".") {
-            if let value = current[String(key)] as? [String: Any] {
-                current = value
+        guard let keyString, !keyString.isEmpty else { return nil }
+
+        var current: Any = data
+
+        for key in keyString.split(separator: ".") {
+            let keyStr = String(key)
+
+            if let dict = current as? [String: Any] {
+                // default dictionary access
+                guard let next = dict[keyStr] else { return nil }
+                current = next
+            } else if let array = current as? [Any] {
+                // array access with index ("drvDistance.0.rangeByFuel") — the legacy
+                // (non-CCS2) Kia EU paths traverse array elements; without this branch
+                // EV range/unit resolved to the whole array and read back as 0.
+                guard let index = Int(keyStr), array.indices.contains(index) else { return nil }
+                current = array[index]
             } else {
-                return current[String(key)]
+                // no dict or array → no further child found
+                return nil
             }
         }
-        return nil
+
+        return current
     }
 }

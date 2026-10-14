@@ -95,10 +95,14 @@ open class APIClientBase {
 
     // MARK: - Internal Request Handling
 
+    /// `session` overrides the client's URLSession for this one request —
+    /// the EU CCI signin uses a redirect-blocking session so the 302's
+    /// Location (which carries the auth code) can be read instead of chased.
     func performLoggedRequest(
         _ request: URLRequest,
         requestType: HTTPRequestType,
-        vin: String? = nil
+        vin: String? = nil,
+        session: URLSession? = nil
     ) async throws -> (Data, HTTPURLResponse) {
         let startTime = Date()
         let requestHeaders = request.allHTTPHeaderFields ?? [:]
@@ -120,7 +124,7 @@ open class APIClientBase {
         )
 
         do {
-            let (data, response) = try await urlSession.data(for: request)
+            let (data, response) = try await (session ?? urlSession).data(for: request)
             return try handleSuccessfulRequest(data: data, response: response, context: context)
         } catch let error as APIError {
             throw error
@@ -164,38 +168,6 @@ open class APIClientBase {
         return (data, httpResponse)
     }
 
-    // MARK: - Error Handling
-
-    func validateHTTPResponse(_ httpResponse: HTTPURLResponse, data: Data, responseBody: String?) throws {
-        if httpResponse.statusCode == 401 {
-            throw APIError.invalidCredentials(
-                "Authentication expired: \(responseBody ?? "Unknown error")",
-                apiName: apiName
-            )
-        }
-
-        if httpResponse.statusCode == 502 {
-            throw APIError.serverError(
-                "Server error (502): \(responseBody ?? "Unknown error")",
-                apiName: apiName
-            )
-        }
-
-        if httpResponse.statusCode >= 400 {
-            let statusText = HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
-            throw APIError(
-                message: "HTTP \(httpResponse.statusCode): \(statusText)",
-                code: httpResponse.statusCode,
-                apiName: apiName
-            )
-        }
-    }
-
-    func handleNetworkError(_ error: Error, context: RequestContext) -> APIError {
-        logHTTPRequest(createErrorLogData(context: context, error: error.localizedDescription))
-        return APIError(message: "Network error: \(error.localizedDescription)", apiName: apiName)
-    }
-
     // MARK: - Logging Helpers
 
     struct RequestContext {
@@ -224,7 +196,13 @@ open class APIClientBase {
     func logHTTPRequest(_ logData: HTTPRequestLogData) {
         let duration = Date().timeIntervalSince(logData.startTime)
         let method = logData.request.httpMethod ?? "GET"
-        let url = logData.request.url?.absoluteString ?? "Unknown URL"
+        let rawURL = logData.request.url?.absoluteString ?? "Unknown URL"
+        // Request URLs can carry credentials too (e.g. the EU CCI token
+        // exchange's `?code=…`), so they go through the same redaction as
+        // bodies.
+        let url = configuration.redactPII
+            ? (SensitiveDataRedactor.redact(rawURL) ?? rawURL)
+            : rawURL
         let stackTrace = captureStackTrace()
 
         // Apply redaction unless disabled
@@ -233,16 +211,23 @@ open class APIClientBase {
         let responseHeaders: [String: String]
         let responseBody: String?
 
+        // Oversized values go first, and regardless of the redaction
+        // setting: a surround-view response is megabytes of base64 JPEG,
+        // which would bloat the persisted log (and every debug export)
+        // and drag the redaction regexes across the whole payload.
+        let sizedRequestBody = SensitiveDataRedactor.elideOversizedValues(logData.requestBody)
+        let sizedResponseBody = SensitiveDataRedactor.elideOversizedValues(logData.responseBody)
+
         if configuration.redactPII {
             requestHeaders = redactSensitiveHeaders(logData.requestHeaders)
-            requestBody = redactSensitiveData(in: logData.requestBody)
+            requestBody = redactSensitiveData(in: sizedRequestBody)
             responseHeaders = redactSensitiveHeaders(logData.responseHeaders)
-            responseBody = redactSensitiveData(in: logData.responseBody)
+            responseBody = redactSensitiveData(in: sizedResponseBody)
         } else {
             requestHeaders = logData.requestHeaders
-            requestBody = logData.requestBody
+            requestBody = sizedRequestBody
             responseHeaders = logData.responseHeaders
-            responseBody = logData.responseBody
+            responseBody = sizedResponseBody
         }
 
         let httpLog = HTTPLog(
@@ -266,7 +251,7 @@ open class APIClientBase {
         logSink?(httpLog)
     }
 
-    private func createErrorLogData(context: RequestContext, error: String) -> HTTPRequestLogData {
+    func createErrorLogData(context: RequestContext, error: String) -> HTTPRequestLogData {
         HTTPRequestLogData(
             requestType: context.requestType,
             request: context.request,

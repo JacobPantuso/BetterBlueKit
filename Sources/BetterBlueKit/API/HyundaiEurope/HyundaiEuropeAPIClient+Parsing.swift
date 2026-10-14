@@ -27,15 +27,9 @@ extension HyundaiEuropeAPIClient {
                     ?? vehicleData["vehicleName"] as? String
             else { return nil }
 
-            let fuelKindCode = vehicleData["type"] as? String ?? ""
-            let fuelType: FuelType =
-                switch fuelKindCode {
-                case "E", "EV": .electric
-                case "P", "PE": .phev
-                default: .gas
-                }
+            let fuelType = Self.parseEuropeFuelType(vehicleData["type"] as? String ?? "")
             let generation = 2  // always 2 there is no such attribute
-            let ccs2: Bool = getBoolFromJson( from: vehicleData, key: "ccuCCS2ProtocolSupport" )
+            let ccs2 = Self.parseCCS2Flag(vehicleData["ccuCCS2ProtocolSupport"])
 
             return Vehicle(
                 vin: vin,
@@ -103,20 +97,8 @@ extension HyundaiEuropeAPIClient {
         )
     }
 
-    package func parseAuthToken(from data: Data, isRefresh: Bool) throws -> AuthToken {
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rToken = isRefresh ? json["refresh_token"] as? String : configuration.refreshToken,
-              let expiresIn = json["expires_in"] as? Int,
-              let accessToken = json["access_token"] as? String else {
-            throw APIError(message: "Failed to parse AuthToken info", apiName: apiName, errorType: .invalidCredentials)
-        }
-
-        return AuthToken(
-                accessToken: accessToken,
-                refreshToken: rToken,
-                expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn))
-            )
-    }
+    // Auth-token parsing moved to the shared
+    // `EuropeCCSPClient.parseLegacyAuthToken(from:)`.
 
     private func parseEVStatus(from vehicleState: [String: Any], pathMap: HyEuResponseKeyPathMap)
         -> VehicleStatus.EVStatus? {
@@ -261,17 +243,33 @@ extension HyundaiEuropeAPIClient {
         let locationTimeZone = pathMap.apiProfile == .legacy ? TimeZone(identifier: "Europe/Berlin") : TimeZone.gmt
         let locationDate = BluelinkDateParser.parse(locationDateString, timeZone: locationTimeZone)
 
-        // location date is older than parking endpoint date -> use parking location
-        if let parkDate, let locationDate, locationDate.compare(parkDate).rawValue <= 0 {
-            return VehicleStatus.Location(
-                latitude: getDoubleFromJson(from: park, key: pathMap[.parkLat]),
-                longitude: getDoubleFromJson(from: park, key: pathMap[.parkLon])
-            )
-        }
-        return VehicleStatus.Location(
+        // Two candidate sources: the /location/park endpoint and the
+        // location embedded in the status response. Either can be empty —
+        // park returns no coordinates when the car has no recent park
+        // event, and the status-embedded location is often stale/missing.
+        let parkLocation = VehicleStatus.Location(
+            latitude: getDoubleFromJson(from: park, key: pathMap[.parkLat]),
+            longitude: getDoubleFromJson(from: park, key: pathMap[.parkLon])
+        )
+        let statusLocation = VehicleStatus.Location(
             latitude: getDoubleFromJson(from: vehicleState, key: pathMap[.locationLat]),
             longitude: getDoubleFromJson(from: vehicleState, key: pathMap[.locationLon])
         )
+
+        // Prefer the park endpoint when it has coordinates and is at least
+        // as recent as the (often stale) status location. Fall back to
+        // whichever source actually carries coordinates so a missing park
+        // event no longer drops the location entirely.
+        let parkIsNewer = (parkDate != nil && locationDate != nil)
+            ? locationDate!.compare(parkDate!).rawValue <= 0
+            : parkLocation.hasCoordinates
+        if parkIsNewer, parkLocation.hasCoordinates {
+            return parkLocation
+        }
+        if statusLocation.hasCoordinates {
+            return statusLocation
+        }
+        return parkLocation.hasCoordinates ? parkLocation : statusLocation
     }
 
     private func parseTirePressure(from vehicleState: [String: Any], pathMap: HyEuResponseKeyPathMap)
@@ -314,7 +312,7 @@ extension HyundaiEuropeAPIClient {
         switch getAnyFromJson(from: data, key: keyString!) {
         case let value as Double: return value
         case let value as Int: return Double(value)
-        case let value as String: return Double(value)!
+        case let value as String: return Double(value) ?? 0
         default: return 0
         }
     }
@@ -355,5 +353,136 @@ extension HyundaiEuropeAPIClient {
         }
 
         return current
+    }
+
+    package func parseEVTripSummaryResponse(_ data: Data, vehicle: Vehicle) throws -> [EVTripSummary] {
+        guard
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let resMsg = json["resMsg"] as? [String: Any],
+            let drivingInfoDetail = resMsg["drivingInfoDetail"] as? [[String: Any]]
+        else {
+            throw APIError(message: "Failed to parse EU trip details", apiName: apiName)
+        }
+
+        return drivingInfoDetail.compactMap { tripData -> EVTripSummary? in
+            // `drivingDate` is a floating calendar day (yyyyMMdd) with no time
+            // or zone. Anchoring it at 12:00 UTC keeps it on the intended day
+            // in every timezone the app renders it in — pinning it to midnight
+            // in a fixed zone put it on the previous day for anyone west of
+            // that zone (BetterBlueKit#46).
+            guard let dateString = tripData["drivingDate"] as? String,
+                  dateString.count == 8,
+                  let year = Int(dateString.prefix(4)),
+                  let month = Int(dateString.dropFirst(4).prefix(2)),
+                  let day = Int(dateString.suffix(2))
+            else {
+                return nil
+            }
+
+            var components = DateComponents()
+            components.year = year
+            components.month = month
+            components.day = day
+            components.hour = 12
+            components.timeZone = TimeZone(identifier: "UTC")
+
+            // Gregorian explicitly, not Calendar.current: on a device set to a
+            // non-Gregorian regional calendar these components would be read
+            // as that calendar's era (Buddhist 2026 is 1483 CE).
+            guard let startDate = Calendar(identifier: .gregorian).date(from: components) else {
+                return nil
+            }
+
+            let totalPwrCsp = tripData["totalPwrCsp"] as? Int ?? 0
+            let motorPwrCsp = tripData["motorPwrCsp"] as? Int ?? 0
+            let climatePwrCsp = tripData["climatePwrCsp"] as? Int ?? 0
+            let eDPwrCsp = tripData["eDPwrCsp"] as? Int ?? 0
+            let batteryMgPwrCsp = tripData["batteryMgPwrCsp"] as? Int ?? 0
+            let regenPwr = tripData["regenPwr"] as? Int ?? 0
+
+            // calculativeOdo arrives as a plain number on current backends,
+            // but sibling CCS payloads wrap distances as {value, unit} dicts —
+            // handle both, honoring the response's unit code when present and
+            // defaulting to kilometers (the EU fleet's native unit).
+            let odoValue: Double
+            let odoUnits: Distance.Units
+            if let odoDict = tripData["calculativeOdo"] as? [String: Any] {
+                odoValue = getDoubleFromJson(from: odoDict, key: "value")
+                odoUnits = Distance.Units(odoDict["unit"] as? Int ?? 1)
+            } else {
+                odoValue = getDoubleFromJson(from: tripData, key: "calculativeOdo")
+                odoUnits = Distance.Units(1)
+            }
+
+            return EVTripSummary(
+                distance: Distance(length: odoValue, units: odoUnits),
+                odometer: Distance(length: 0, units: odoUnits),  // Not provided by EU /drvhistory
+                accessoriesEnergy: eDPwrCsp,
+                totalEnergyUsed: totalPwrCsp,
+                regenEnergy: regenPwr,
+                climateEnergy: climatePwrCsp,
+                drivetrainEnergy: motorPwrCsp,
+                batteryCareEnergy: batteryMgPwrCsp,
+                startDate: startDate,
+                duration: .seconds(0),  // Not provided by EU /drvhistory day summaries
+                avgSpeed: 0,  // Not provided — fetchEVTripInfo(date:) has per-trip speeds
+                maxSpeed: 0  // Not provided — fetchEVTripInfo(date:) has per-trip speeds
+            )
+        }
+    }
+
+    package func parseIndividualTripsResponse(_ data: Data) throws -> [EVTripInfo] {
+        guard
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let resMsg = json["resMsg"] as? [String: Any],
+            let dayTripList = resMsg["dayTripList"] as? [[String: Any]]
+        else {
+            throw APIError(message: "Failed to parse EU individual trips", apiName: apiName)
+        }
+
+        var allTrips: [EVTripInfo] = []
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.dateFormat = "yyyyMMddHHmmss"
+        // No explicit zone: `tripDay`+`tripTime` is a wall-clock reading of
+        // when the driver was in the car, and the UI renders it in the
+        // device's zone — so interpreting it locally shows the clock time the
+        // backend reported. Pinning it to a fixed European zone shifted every
+        // trip time by the offset between that zone and the user's
+        // (BetterBlueKit#46 fixed the same mistake on the day-level dates).
+        // If a live account ever shows these an hour off, the backend is
+        // reporting CET rather than vehicle-local and this needs revisiting.
+
+        for dayTrip in dayTripList {
+            guard let dateStr = dayTrip["tripDay"] as? String,
+                  let tripList = dayTrip["tripList"] as? [[String: Any]] else {
+                continue
+            }
+
+            for tripData in tripList {
+                // A trip without a parseable start time is dropped rather than
+                // stamped with a fabricated date.
+                guard let hhmmss = tripData["tripTime"] as? String,
+                      let tripDate = dateFormatter.date(from: dateStr + hhmmss) else {
+                    continue
+                }
+                let driveTime = tripData["tripDrvTime"] as? Int ?? 0
+                let idleTime = tripData["tripIdleTime"] as? Int ?? 0
+                let distance = getDoubleFromJson(from: tripData, key: "tripDist")
+                let avgSpeed = getDoubleFromJson(from: tripData, key: "tripAvgSpeed")
+                let maxSpeed = getDoubleFromJson(from: tripData, key: "tripMaxSpeed")
+
+                allTrips.append(EVTripInfo(
+                    date: tripDate,
+                    driveTime: .seconds(driveTime * 60),
+                    idleTime: .seconds(idleTime * 60),
+                    distance: Distance(length: distance, units: .kilometers), // Hyundai EU defaults to kilometers
+                    avgSpeed: avgSpeed,
+                    maxSpeed: maxSpeed
+                ))
+            }
+        }
+
+        return allTrips
     }
 }
