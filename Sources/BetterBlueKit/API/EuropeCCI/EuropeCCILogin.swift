@@ -253,16 +253,16 @@ extension APIClientBase {
         guard response.statusCode == 302,
               let location = response.value(forHTTPHeaderField: "Location") else {
             throw APIError.invalidCredentials(
-                "Signin failed (HTTP \(response.statusCode)). Check username and password.",
+                "\(config.brandLabel) didn't accept that email or password (HTTP \(response.statusCode)).",
                 apiName: apiName
             )
         }
-        return try parseCCISigninCode(fromLocation: location)
+        return try parseCCISigninCode(fromLocation: location, brand: config.brandLabel)
     }
 
     /// Parse the signin redirect's query for `code`, translating the known
     /// error shapes into typed errors.
-    private func parseCCISigninCode(fromLocation location: String) throws -> String {
+    private func parseCCISigninCode(fromLocation location: String, brand: String) throws -> String {
         guard let comps = URLComponents(string: location) else {
             throw APIError(message: "Unparseable redirect after signin", apiName: apiName)
         }
@@ -271,18 +271,20 @@ extension APIClientBase {
         }
         if let errorDesc = comps.queryItems?.first(where: { $0.name == "error_description" })?.value {
             throw APIError.invalidCredentials(
-                "Authentication rejected: \(errorDesc)", apiName: apiName
+                "\(brand) didn't accept that email or password: \(errorDesc)", apiName: apiName
             )
         }
         if comps.path.contains("/web/v1/user/authorization") {
             throw APIError(
-                message: "Account consent required — log in via a browser once to accept the terms, then retry.",
+                message: "\(brand) needs you to accept updated terms. Sign in once on the \(brand) website or app, then try again.",
                 apiName: apiName
             )
         }
         if comps.path.contains("authorize") {
+            // The sign-in service sends a rejected login back to its own
+            // authorize page rather than answering with an error.
             throw APIError.invalidCredentials(
-                "Authentication failed — returned to login page. Check username and password.",
+                "\(brand) didn't accept that email or password.",
                 apiName: apiName
             )
         }
