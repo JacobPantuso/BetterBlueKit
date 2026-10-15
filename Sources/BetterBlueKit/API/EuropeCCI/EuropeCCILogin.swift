@@ -37,6 +37,14 @@ struct EuropeCCIConfig {
     let clientName: String
     let clientOSVersion: String
     let notificationProvider: String
+    /// `client-name` on fingerprint-signed calls ("HyundaiEU"), which the
+    /// signature covers. The legacy routes keep `clientName`.
+    let signedClientName: String
+    /// `X-Brand` on signed calls.
+    let brandLabel: String
+    /// The three secret pieces of the X-Fingerprint key, from the Android
+    /// OneApp 1.4.0 build. They rotate with app releases.
+    let fingerprintKey: [String]
 
     /// Values observed from the OneApp builds by hyundai_kia_connect_api.
     static let clientVersion = "1.3.3"
@@ -49,7 +57,10 @@ struct EuropeCCIConfig {
         packageId: "com.hyundai.oneapp.eu",
         clientName: "hyundai",
         clientOSVersion: "18.7",
-        notificationProvider: "APNS"
+        notificationProvider: "APNS",
+        signedClientName: "HyundaiEU",
+        brandLabel: "Hyundai",
+        fingerprintKey: ["OsZDfDuCyVX", "yfqjCoA2JbX", "2MrLpGwNBC"]
     )
 
     static let kia = EuropeCCIConfig(
@@ -60,7 +71,10 @@ struct EuropeCCIConfig {
         packageId: "com.kia.oneapp.eu",
         clientName: "kia",
         clientOSVersion: "27",
-        notificationProvider: "IOS_APPSTORE"
+        notificationProvider: "IOS_APPSTORE",
+        signedClientName: "KiaEU",
+        brandLabel: "Kia",
+        fingerprintKey: ["yb4Z1n2nlKe", "ukNilE7QEdb", "KB34nStPVa"]
     )
 }
 
@@ -281,14 +295,13 @@ extension APIClientBase {
     /// in the URL query; the POST has no body.
     private func cciTokenExchange(config: EuropeCCIConfig, code: String) async throws -> CCITokenSet {
         let encodedCode = code.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? code
-        var request = URLRequest(
-            url: URL(string: "\(config.cciBaseURL)/domain/api/v1/auth/token?code=\(encodedCode)")!
+        let (data, _) = try await cciGatedPost(
+            config: config,
+            path: "/auth/v1/token",
+            legacyPath: "/domain/api/v1/auth/token",
+            query: "code=\(encodedCode)",
+            legacyHeaders: cciHeaders(config: config)
         )
-        request.httpMethod = "POST"
-        for (key, value) in cciHeaders(config: config) {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
-        let (data, _) = try await performLoggedRequest(request, requestType: .login)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accessToken = json["accessToken"] as? String, !accessToken.isEmpty else {
             throw APIError(
@@ -313,14 +326,22 @@ extension APIClientBase {
     private func cciExchangeCCSToken(
         config: EuropeCCIConfig, set: CCITokenSet
     ) async throws -> (token: String, expiresAt: Date) {
-        var request = URLRequest(
-            url: URL(string: "\(config.cciBaseURL)/domain/api/v1/auth/token-exchange?serviceType=CCS")!
-        )
-        request.httpMethod = "POST"
-        for (key, value) in cciHeaders(config: config, set: set) {
-            request.setValue(value, forHTTPHeaderField: key)
+        var tokenHeaders = [
+            "authorization": "Bearer \(set.accessToken)",
+            "Authentication": set.nonCcsToken
+        ]
+        if !set.exchangeableAccessToken.isEmpty {
+            tokenHeaders["exchangeable-token"] = set.exchangeableAccessToken
+            tokenHeaders["non-ccs-token"] = set.nonCcsToken
         }
-        let (data, _) = try await performLoggedRequest(request, requestType: .login)
+        let (data, _) = try await cciGatedPost(
+            config: config,
+            path: "/auth/v1/token-exchange",
+            legacyPath: "/domain/api/v1/auth/token-exchange",
+            query: "serviceType=CCS",
+            extraHeaders: tokenHeaders,
+            legacyHeaders: cciHeaders(config: config, set: set)
+        )
         let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         guard let ccsToken = (json["accessToken"] as? String) ?? (json["ccsAccessToken"] as? String),
               !ccsToken.isEmpty else {
@@ -337,16 +358,9 @@ extension APIClientBase {
     /// A `set-cookie: t=…` on the response carries an updated exchangeable
     /// token when present.
     private func cciTokenRefresh(config: EuropeCCIConfig, set: CCITokenSet) async throws -> CCITokenSet {
-        var request = URLRequest(
-            url: URL(string: "\(config.cciBaseURL)/domain/api/v2/auth/token-refresh")!
-        )
-        request.httpMethod = "POST"
-        var headers = cciHeaders(config: config, set: set)
-        headers["Content-Type"] = "application/json"
-        headers["Content-Length"] = nil
-        for (key, value) in headers {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
+        var legacyHeaders = cciHeaders(config: config, set: set)
+        legacyHeaders["Content-Type"] = "application/json"
+        legacyHeaders["Content-Length"] = nil
         let body: [String: String] = [
             "accessToken": set.accessToken,
             "refreshToken": set.refreshToken,
@@ -356,8 +370,16 @@ extension APIClientBase {
             "nonCcsRefreshToken": set.nonCcsRefreshToken,
             "idToken": set.idToken
         ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await performLoggedRequest(request, requestType: .login)
+        // Signed over these exact bytes, so they're encoded once and sent as is.
+        let bodyData = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+        let (data, response) = try await cciGatedPost(
+            config: config,
+            path: "/auth/v2/token-refresh",
+            legacyPath: "/domain/api/v2/auth/token-refresh",
+            body: bodyData,
+            extraHeaders: ["Content-Type": "application/json"],
+            legacyHeaders: legacyHeaders
+        )
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accessToken = json["accessToken"] as? String, !accessToken.isEmpty else {
             throw APIError.invalidCredentials(
@@ -384,6 +406,61 @@ extension APIClientBase {
             nonCcsRefreshToken: json["nonCcsRefreshToken"] as? String ?? set.nonCcsRefreshToken,
             idToken: json["idToken"] as? String ?? set.idToken
         )
+    }
+
+    /// POST to a fingerprint-gated CCI endpoint: the signed `path` first, and
+    /// the legacy `/domain/api` route only when the gate itself rejects the
+    /// signed call (9035/9036/9037), so a gate rollback keeps working. Any
+    /// other failure on the signed path is a real answer and is thrown.
+    private func cciGatedPost(
+        config: EuropeCCIConfig,
+        path: String,
+        legacyPath: String,
+        query: String? = nil,
+        body: Data = Data(),
+        extraHeaders: [String: String] = [:],
+        legacyHeaders: [String: String]
+    ) async throws -> (Data, HTTPURLResponse) {
+        func makeRequest(_ path: String, headers: [String: String]) -> URLRequest {
+            let suffix = query.map { "?\($0)" } ?? ""
+            var request = URLRequest(url: URL(string: "\(config.cciBaseURL)\(path)\(suffix)")!)
+            request.httpMethod = "POST"
+            for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
+            if body.isEmpty {
+                request.setValue("0", forHTTPHeaderField: "Content-Length")
+            } else {
+                request.httpBody = body
+            }
+            return request
+        }
+
+        var signed = EuropeCCIFingerprint.headers(
+            config: config,
+            deviceId: configuration.deviceId ?? "",
+            timezone: Self.currentUTCOffsetString(),
+            body: String(data: body, encoding: .utf8) ?? ""
+        )
+        signed.merge(extraHeaders) { _, new in new }
+        do {
+            return try await performLoggedRequest(makeRequest(path, headers: signed), requestType: .login)
+        } catch {
+            guard let gateCode = EuropeCCIFingerprint.gateRejection(in: error) else { throw error }
+            BBLogger.warning(.api, "[\(apiName)] CCI fingerprint gate rejected \(path) (\(gateCode)); trying \(legacyPath)")
+            do {
+                return try await performLoggedRequest(makeRequest(legacyPath, headers: legacyHeaders), requestType: .login)
+            } catch {
+                guard let legacyCode = EuropeCCIFingerprint.gateRejection(in: error) else { throw error }
+                // Both routes refused by the app check: the signing constants
+                // have rotated with a OneApp release.
+                throw APIError(
+                    message: "\(config.brandLabel)'s sign-in service refused this app's check "
+                        + "(code \(max(gateCode, legacyCode))). This needs an app update, "
+                        + "not a new password. Please report it.",
+                    code: 400,
+                    apiName: apiName
+                )
+            }
+        }
     }
 
     /// Headers for the CCI API. Distinctive shapes, per the OneApp builds:

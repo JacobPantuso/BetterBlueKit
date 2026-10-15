@@ -36,10 +36,14 @@ extension APIClientBase {
 
         if httpResponse.statusCode >= 400 {
             let statusText = HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+            // The body rides along so callers that branch on a service's own
+            // error code (the EU CCI fingerprint gate's 9035/9036/9037) can
+            // read it; the message stays the generic status line.
             throw APIError(
                 message: "HTTP \(httpResponse.statusCode): \(statusText)",
                 code: httpResponse.statusCode,
-                apiName: apiName
+                apiName: apiName,
+                userInfo: responseBody.map { ["responseBody": String($0.prefix(2000))] }
             )
         }
     }
