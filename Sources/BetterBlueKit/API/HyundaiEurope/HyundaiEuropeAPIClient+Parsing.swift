@@ -39,7 +39,9 @@ extension HyundaiEuropeAPIClient {
                 fuelType: fuelType,
                 generation: generation,
                 odometer: Distance(length: 0, units: .kilometers),
-                marketOptions: .hyundaiEurope(ccs2Supported: ccs2)
+                marketOptions: .hyundaiEurope(ccs2Supported: ccs2),
+                modelYear: Int(vehicleData["year"] as? String ?? "") ?? vehicleData["year"] as? Int,
+                exteriorColorCode: (vehicleData["detailInfo"] as? [String: Any])?["outColor"] as? String
             )
         }
     }

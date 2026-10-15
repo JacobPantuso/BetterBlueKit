@@ -20,6 +20,10 @@ public struct Vehicle: Codable, Identifiable, Equatable, Sendable {
     /// the climate codec needs it; nil means unknown and decodes with
     /// the pre-2020 scale, matching hyundai_kia_connect_api's default.
     public var modelYear: Int?
+    /// The manufacturer's paint code, e.g. "A2B" (Abyss Black). Canada's
+    /// vehicle list sends it as `exteriorColor`, Europe's as
+    /// `detailInfo.outColor`; nil where the region doesn't report one.
+    public var exteriorColorCode: String?
 
     // Optional fields populated from the vehicle list endpoint
     public var trim: String?
@@ -33,7 +37,8 @@ public struct Vehicle: Codable, Identifiable, Equatable, Sendable {
                 marketOptions: VehicleMarketOptions = .generic,
                 trim: String? = nil, preConditioningOption: Int? = nil,
                 mileageForNextService: Double? = nil, nextServiceDate: String? = nil,
-                webManualUrl: String? = nil, modelYear: Int? = nil) {
+                webManualUrl: String? = nil, modelYear: Int? = nil,
+                exteriorColorCode: String? = nil) {
         (self.vin, self.regId, self.model, self.accountId) = (vin, regId, model, accountId)
         (self.fuelType, self.generation, self.odometer, self.vehicleKey) =
             (fuelType, generation, odometer, vehicleKey)
@@ -44,5 +49,6 @@ public struct Vehicle: Codable, Identifiable, Equatable, Sendable {
         self.nextServiceDate = nextServiceDate
         self.webManualUrl = webManualUrl
         self.modelYear = modelYear
+        self.exteriorColorCode = exteriorColorCode
     }
 }

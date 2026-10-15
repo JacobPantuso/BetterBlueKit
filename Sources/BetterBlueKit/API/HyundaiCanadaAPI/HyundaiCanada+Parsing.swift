@@ -64,6 +64,10 @@ extension HyundaiCanadaAPIClient {
             let mileageForNextService: Double? = extractNumber(from: vehicleData["mileageForNextService"])
             let nextServiceDate = vehicleData["daysForNextService"] as? String
             let webManualUrl = vehicleData["webManualUrl"] as? String
+            let modelYear: Int? = extractNumber(from: vehicleData["modelYear"])
+            let paintCode = (vehicleData["exteriorColor"] as? String)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .flatMap { $0.isEmpty ? nil : $0 }
 
             return Vehicle(
                 vin: vin,
@@ -77,7 +81,9 @@ extension HyundaiCanadaAPIClient {
                 preConditioningOption: preConditioningOption,
                 mileageForNextService: mileageForNextService,
                 nextServiceDate: nextServiceDate,
-                webManualUrl: webManualUrl
+                webManualUrl: webManualUrl,
+                modelYear: modelYear,
+                exteriorColorCode: paintCode
             )
         }
     }
