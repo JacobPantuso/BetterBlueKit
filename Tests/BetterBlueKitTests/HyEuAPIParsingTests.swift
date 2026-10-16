@@ -1116,7 +1116,8 @@ struct HyJSONFormatTests {
         #expect(vehicleStatus.syncDate == Date(timeIntervalSince1970: 1778941310.471))
         #expect(vehicleStatus.location.latitude == 50.803116000000002)
         #expect(vehicleStatus.location.longitude == 10.117241000000001)
-        #expect(vehicleStatus.lockStatus == .locked)
+        // Every door's `Lock` is 0 with a rear door and the boot open: unlocked.
+        #expect(vehicleStatus.lockStatus == .unlocked)
         #expect(vehicleStatus.climateStatus.airControlOn == false)
         #expect(vehicleStatus.climateStatus.defrostOn == false)
         #expect(vehicleStatus.climateStatus.steeringWheelHeatingOn == false)
