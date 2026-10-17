@@ -41,7 +41,9 @@ extension HyundaiEuropeAPIClient {
                 odometer: Distance(length: 0, units: .kilometers),
                 marketOptions: .hyundaiEurope(ccs2Supported: ccs2),
                 modelYear: Int(vehicleData["year"] as? String ?? "") ?? vehicleData["year"] as? Int,
-                exteriorColorCode: (vehicleData["detailInfo"] as? [String: Any])?["outColor"] as? String
+                exteriorColorCode: (vehicleData["detailInfo"] as? [String: Any])?["outColor"] as? String,
+                modelName: ((vehicleData["detailInfo"] as? [String: Any])?["saleCarmdlEnNm"] as? String)
+                    ?? (vehicleData["vehicleName"] as? String)
             )
         }
     }
@@ -175,15 +177,32 @@ extension HyundaiEuropeAPIClient {
                 locked: getBoolFromJson(from: vehicleState, key: pathMap[.lockStatus])
             )
         }
-        // `Lock` is 1 when the door is locked. It was read inverted, as the
-        // Kia-tuned ccs2 parser upstream does, which showed Hyundai EU cars
-        // locked when unlocked and the other way round (confirmed by an EU
-        // owner, and by the CCNC fixture: a door and the boot open, every
-        // `Lock` 0).
-        let driver = getBoolFromJson(from: vehicleState, key: pathMap[.lock1L])
-        let passanger = getBoolFromJson(from: vehicleState, key: pathMap[.lock1R])
-        let backLeft = getBoolFromJson(from: vehicleState, key: pathMap[.lock2L])
-        let backRight = getBoolFromJson(from: vehicleState, key: pathMap[.lock2R])
+        // `Lock` 0 is locked, as upstream reads it. Inverting this (9dbc5e8)
+        // was reverted on 2026-10-17: the EU owner who reported it inverted
+        // drives a 2026 IONIQ 6 whose status sends `Lock` 0 for every door
+        // whether the car is locked or not, so both readings looked wrong to
+        // him half the time. MyHyundai shows his car's lock correctly, so it
+        // reads lock state from somewhere else; see HyEuLockStatusTests.
+        let driver = getBoolFromJson(
+            from: vehicleState,
+            key: pathMap[.lock1L],
+            inverted: true
+        )
+        let passanger = getBoolFromJson(
+            from: vehicleState,
+            key: pathMap[.lock1R],
+            inverted: true
+        )
+        let backLeft = getBoolFromJson(
+            from: vehicleState,
+            key: pathMap[.lock2L],
+            inverted: true
+        )
+        let backRight = getBoolFromJson(
+            from: vehicleState,
+            key: pathMap[.lock2R],
+            inverted: true
+        )
         return VehicleStatus.LockStatus(
             locked: driver && passanger && backLeft && backRight
         )

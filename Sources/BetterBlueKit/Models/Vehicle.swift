@@ -24,6 +24,10 @@ public struct Vehicle: Codable, Identifiable, Equatable, Sendable {
     /// vehicle list sends it as `exteriorColor`, Europe's as
     /// `detailInfo.outColor`; nil where the region doesn't report one.
     public var exteriorColorCode: String?
+    /// The model as the manufacturer names it ("IONIQ 6 EV", "EV9"), not the
+    /// owner's nickname, which is what `model` holds. Canada's vehicle list
+    /// sends it as `modelName`, Europe's as `detailInfo.saleCarmdlEnNm`.
+    public var modelName: String?
 
     // Optional fields populated from the vehicle list endpoint
     public var trim: String?
@@ -38,7 +42,7 @@ public struct Vehicle: Codable, Identifiable, Equatable, Sendable {
                 trim: String? = nil, preConditioningOption: Int? = nil,
                 mileageForNextService: Double? = nil, nextServiceDate: String? = nil,
                 webManualUrl: String? = nil, modelYear: Int? = nil,
-                exteriorColorCode: String? = nil) {
+                exteriorColorCode: String? = nil, modelName: String? = nil) {
         (self.vin, self.regId, self.model, self.accountId) = (vin, regId, model, accountId)
         (self.fuelType, self.generation, self.odometer, self.vehicleKey) =
             (fuelType, generation, odometer, vehicleKey)
@@ -50,5 +54,6 @@ public struct Vehicle: Codable, Identifiable, Equatable, Sendable {
         self.webManualUrl = webManualUrl
         self.modelYear = modelYear
         self.exteriorColorCode = exteriorColorCode
+        self.modelName = modelName
     }
 }

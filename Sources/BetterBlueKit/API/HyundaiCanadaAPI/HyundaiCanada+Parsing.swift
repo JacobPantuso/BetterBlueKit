@@ -83,7 +83,8 @@ extension HyundaiCanadaAPIClient {
                 nextServiceDate: nextServiceDate,
                 webManualUrl: webManualUrl,
                 modelYear: modelYear,
-                exteriorColorCode: paintCode
+                exteriorColorCode: paintCode,
+                modelName: (vehicleData["modelName"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             )
         }
     }

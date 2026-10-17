@@ -44,7 +44,9 @@ extension KiaEuropeAPIClient {
                 odometer: Distance(length: 0, units: .kilometers),
                 marketOptions: .kiaEurope(ccs2Supported: ccs2),
                 modelYear: Int(vehicleData["year"] as? String ?? "") ?? vehicleData["year"] as? Int,
-                exteriorColorCode: (vehicleData["detailInfo"] as? [String: Any])?["outColor"] as? String
+                exteriorColorCode: (vehicleData["detailInfo"] as? [String: Any])?["outColor"] as? String,
+                modelName: ((vehicleData["detailInfo"] as? [String: Any])?["saleCarmdlEnNm"] as? String)
+                    ?? (vehicleData["vehicleName"] as? String)
             )
         }
     }

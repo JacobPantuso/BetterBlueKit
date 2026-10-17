@@ -27,6 +27,7 @@ struct VehiclePaintCodeTests {
         let vehicle = try #require(try client.parseCanadaVehiclesResponse(Data(json.utf8)).first)
         #expect(vehicle.exteriorColorCode == "A2B")
         #expect(vehicle.modelYear == 2024)
+        #expect(vehicle.modelName == "IONIQ 6 EV")
     }
 
     @Test("Europe reads detailInfo.outColor and year")
@@ -37,5 +38,6 @@ struct VehiclePaintCodeTests {
         let vehicles = try client.parseVehiclesResponse(Data(HyEuSampleJSON.vehiclesList.utf8))
         #expect(vehicles.map(\.exteriorColorCode) == ["M9U", "R2P"])
         #expect(vehicles.map(\.modelYear) == [2022, 2025])
+        #expect(vehicles.map(\.modelName) == ["IONIQ 5", "IONIQ 5"])
     }
 }
