@@ -324,7 +324,7 @@ extension EuropeCCSPClient {
                         vin: vehicle.vin
                     )
                 } catch {
-                    BBLogger.debug(.api, "\(apiName): legacy wake GET /status failed: \(error)")
+                    BBLogger.warning(.api, "\(apiName): legacy wake GET /status failed, falling back to the cached status: \(error)")
                 }
             }
         }
