@@ -99,9 +99,14 @@ extension EuropeCCSPClient {
         // On a right-hand-drive car the driver sits on the right, so the
         // front-left/right seat controls map to passenger/driver. Matches
         // hyundai_kia_connect_api's `start_climate` seat handling.
-        let (drvSeat, psgSeat) = drvSeatLoc == "R"
-            ? (options.frontRightSeat, options.frontLeftSeat)
-            : (options.frontLeftSeat, options.frontRightSeat)
+        //
+        // The states are Hyundai's codes, not BetterBlueKit's 0-3 levels: 0 off,
+        // 3-5 cool low-high, 6-8 heat low-high (upstream SEAT_STATUS; its
+        // `start_climate` passes them through). Sending the bare level asked
+        // for "Low Cool" when High heat was meant.
+        let left = convertSeatSetting(options.frontLeftSeat, options.frontLeftVentilationEnabled)
+        let right = convertSeatSetting(options.frontRightSeat, options.frontRightVentilationEnabled)
+        let (drvSeat, psgSeat) = drvSeatLoc == "R" ? (right, left) : (left, right)
         return [
             "command": "start",
             "ignitionDuration": options.duration,
@@ -115,8 +120,8 @@ extension EuropeCCSPClient {
             "seatClimateInfo": [
                 "drvSeatClimateState": drvSeat,
                 "psgSeatClimateState": psgSeat,
-                "rrSeatClimateState": options.rearRightSeat,
-                "rlSeatClimateState": options.rearLeftSeat
+                "rrSeatClimateState": convertSeatSetting(options.rearRightSeat, options.rearRightVentilationEnabled),
+                "rlSeatClimateState": convertSeatSetting(options.rearLeftSeat, options.rearLeftVentilationEnabled)
             ],
             "tempUnit": "C",
             "windshieldFrontDefogState": options.defrost
