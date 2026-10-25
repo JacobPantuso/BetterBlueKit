@@ -15,10 +15,12 @@ extension APIClientBase {
     /// The `_CCS_APP_AOS` suffix is what gets past Cloudflare on
     /// `idpconnect-eu.{kia,hyundai}.com` — without it, the authorize
     /// endpoint returns 400. Discovered in hyundai_kia_connect_api PR #1123.
+    /// A current Android Chrome string. Since 2026-10-22 the OneApp signin
+    /// sends the 2012 Chrome/18 string back to the login page, which reads as
+    /// a wrong password (hyundai_kia_connect_api #1416).
     static var euMobileUserAgent: String {
-        "Mozilla/5.0 (Linux; Android 4.1.1; Galaxy Nexus Build/JRO03C) " +
-        "AppleWebKit/535.19 (KHTML, like Gecko) " +
-        "Chrome/18.0.1025.166 Mobile Safari/535.19_CCS_APP_AOS"
+        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36_CCS_APP_AOS"
     }
 
     // MARK: - RSA / encoding helpers (used by signin)
