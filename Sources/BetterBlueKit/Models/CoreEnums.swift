@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - Core Enums
 
-public enum Brand: String, Codable, CaseIterable {
+public enum Brand: String, Codable, CaseIterable, Sendable {
     case hyundai, kia, fake
 
     public var displayName: String {
@@ -58,20 +58,27 @@ public func isTestAccount(username: String, password: String) -> Bool {
     username.lowercased() == "testaccount@betterblue.com" && password == "betterblue"
 }
 
-public enum FuelType: String, CaseIterable, Codable {
+public enum FuelType: String, CaseIterable, Codable, Sendable {
     case gas
     case electric
+    case phev
 
-    init(number: Int) {
+    public init(number: Int) {
         self = switch number {
         case 0: .gas
+        case 1: .phev
         case 2: .electric
         default: .gas
         }
     }
+
+    /// Whether this fuel type has electric/EV capability (true for both pure EV and PHEV)
+    public var hasElectricCapability: Bool {
+        self != .gas
+    }
 }
 
-public enum Region: String, CaseIterable, Codable {
+public enum Region: String, CaseIterable, Codable, Sendable {
     case usa = "US", canada = "CA", europe = "EU"
     case australia = "AU", china = "CN", india = "IN"
 
@@ -83,6 +90,32 @@ public enum Region: String, CaseIterable, Codable {
             return Brand.kiaBaseUrl(region: self)
         case .fake:
             return "https://fake.api.testing.com"
+        }
+    }
+
+    public var displayName: String {
+        switch self {
+        case .usa: "USA"
+        case .canada: "Canada"
+        case .europe: "Europe"
+        case .australia: "Australia"
+        case .china: "China"
+        case .india: "India"
+        }
+    }
+}
+
+public enum VehicleMarketOptions: Codable, Equatable, Sendable {
+    case hyundaiEurope(ccs2Supported: Bool)
+    case kiaEurope(ccs2Supported: Bool)
+    case generic
+
+    var ccs2Supported: Bool {
+        switch self {
+        case let .hyundaiEurope(ccs2Supported), let .kiaEurope(ccs2Supported):
+            return ccs2Supported
+        case .generic:
+            return false
         }
     }
 }

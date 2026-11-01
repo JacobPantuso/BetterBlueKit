@@ -196,6 +196,49 @@ struct VehicleStatusTests {
         #expect(decoded.temperature.units == original.temperature.units)
     }
 
+    // MARK: - Additional Flag Tests
+
+    @Test("VehicleStatus additional flags initialization and codable")
+    func testVehicleStatusAdditionalFlags() throws {
+        let location = VehicleStatus.Location(latitude: 0, longitude: 0)
+        let climate = VehicleStatus.ClimateStatus(
+            defrostOn: false,
+            airControlOn: false,
+            steeringWheelHeatingOn: false,
+            temperature: Temperature(value: 0, units: .celsius)
+        )
+
+        let original = VehicleStatus(
+            vin: "FLAG_VIN",
+            location: location,
+            lockStatus: .unknown,
+            climateStatus: climate,
+            engineOn: true,
+            accessoryOn: false,
+            remoteIgnition: true,
+            transmissionCondition: false,
+            sleepMode: true,
+            washerFluidLow: true
+        )
+
+        #expect(original.engineOn == true)
+        #expect(original.accessoryOn == false)
+        #expect(original.remoteIgnition == true)
+        #expect(original.transmissionCondition == false)
+        #expect(original.sleepMode == true)
+        #expect(original.washerFluidLow == true)
+
+        let encoded = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(VehicleStatus.self, from: encoded)
+
+        #expect(decoded.engineOn == original.engineOn)
+        #expect(decoded.accessoryOn == original.accessoryOn)
+        #expect(decoded.remoteIgnition == original.remoteIgnition)
+        #expect(decoded.transmissionCondition == original.transmissionCondition)
+        #expect(decoded.sleepMode == original.sleepMode)
+        #expect(decoded.washerFluidLow == original.washerFluidLow)
+    }
+
     // MARK: - VehicleStatus Tests
 
     @Test("VehicleStatus creation with electric vehicle")
@@ -369,5 +412,21 @@ struct VehicleStatusTests {
 
         #expect(vehicleStatus.gasRange?.percentage == 0.0)
         #expect(vehicleStatus.gasRange?.range.length == 0.0)
+    }
+
+    @Test("PlugType.fromBatteryPlugin handles all documented + observed codes")
+    func testPlugTypeFromBatteryPlugin() {
+        // Documented codes
+        #expect(VehicleStatus.PlugType(fromBatteryPlugin: 0) == .unplugged)
+        #expect(VehicleStatus.PlugType(fromBatteryPlugin: 1) == .dcCharger)
+        #expect(VehicleStatus.PlugType(fromBatteryPlugin: 2) == .acCharger)
+        #expect(VehicleStatus.PlugType(fromBatteryPlugin: 3) == .acCharger)
+        // `4` observed in the wild on an IONIQ 5 plugged into a J1772
+        // AC charger. Previously fell through to DC and showed the
+        // wrong icon — locked in here so the regression doesn't return.
+        #expect(VehicleStatus.PlugType(fromBatteryPlugin: 4) == .acCharger)
+        // Any other unknown non-zero value defaults to AC (the safer
+        // default — DC fast charging is the specific case).
+        #expect(VehicleStatus.PlugType(fromBatteryPlugin: 99) == .acCharger)
     }
 }

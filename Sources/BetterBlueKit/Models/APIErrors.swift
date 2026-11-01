@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - Error Types
 
-public struct APIError: Error, Codable {
+public struct APIError: LocalizedError, Codable {
     public let message: String, code: Int?
     public let apiName: String?, errorType: ErrorType
     public let userInfo: [String: String]?
@@ -18,7 +18,45 @@ public struct APIError: Error, Codable {
         case general, invalidVehicleSession, invalidCredentials
         case serverError, invalidPin, concurrentRequest, failedRetryLogin
         case requiresMFA, kiaInvalidRequest, regionNotSupported
+        /// The service refused because this vehicle lacks the hardware
+        /// or subscription for the feature (e.g. surround view on a trim
+        /// without the cameras). Permanent for this vehicle — retrying
+        /// won't help, and UIs should explain rather than alarm.
+        case featureNotSupported
+        /// The command was accepted, but post-command status polling didn't
+        /// observe the expected change in time. NOT a command failure — the
+        /// backends (especially Kia US) can take minutes to reflect a state
+        /// change, so UIs should render this as a soft "awaiting
+        /// confirmation" state rather than a failure (BetterBlue#83).
+        case statusVerificationTimeout
+
+        /// Human-readable label for UI. Prefer this over the raw enum
+        /// name when rendering the error type to users.
+        public var displayLabel: String {
+            switch self {
+            case .general: "Error"
+            case .invalidVehicleSession: "Session Expired"
+            case .invalidCredentials: "Invalid Credentials"
+            case .serverError: "Server Error"
+            case .invalidPin: "Invalid PIN"
+            case .concurrentRequest: "Request In Progress"
+            case .failedRetryLogin: "Reauthentication Failed"
+            case .requiresMFA: "Verification Required"
+            case .kiaInvalidRequest: "Request Rejected"
+            case .regionNotSupported: "Region Not Supported"
+            case .featureNotSupported: "Not Supported by Vehicle"
+            case .statusVerificationTimeout: "Awaiting Confirmation"
+            }
+        }
     }
+
+    // `LocalizedError` is what `Error.localizedDescription` actually
+    // dispatches to. Without this conformance `NSError` picks up the
+    // Codable type and emits strings like
+    // "The operation couldn't be completed. (BetterBlueKit.APIError error 1.)"
+    // which are useless to users and to support.
+    public var errorDescription: String? { message }
+    public var failureReason: String? { errorType.displayLabel }
 
     public init(
         message: String,
@@ -135,6 +173,13 @@ public struct APIError: Error, Codable {
         apiName: String? = nil,
     ) -> APIError {
         logError(message, code: 502, apiName: apiName, errorType: .kiaInvalidRequest)
+    }
+
+    public static func featureNotSupported(
+        _ message: String = "This vehicle does not support this feature",
+        apiName: String? = nil,
+    ) -> APIError {
+        logError(message, code: 502, apiName: apiName, errorType: .featureNotSupported)
     }
 
     public static func regionNotSupported(

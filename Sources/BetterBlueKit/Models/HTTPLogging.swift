@@ -12,7 +12,26 @@ import Foundation
 public enum HTTPRequestType: String, CaseIterable, Codable, Sendable {
     case login, fetchVehicles, fetchVehicleStatus, sendCommand
     case sendMFA, verifyMFA
-    case fetchEVTripDetails
+    case fetchEVTripSummary, fetchEVTripInfo
+    case requestSurroundView, fetchSurroundView
+
+    /// Logs are persisted with the raw value, so renaming a case orphans
+    /// existing rows: decoding "fetchEVTripDetails" (the pre-rename name of
+    /// `fetchEVTripSummary`) would otherwise throw and take down whatever
+    /// fetched the row — the HTTP log list or a debug export.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        if let value = HTTPRequestType(rawValue: raw) {
+            self = value
+        } else if raw == "fetchEVTripDetails" {
+            self = .fetchEVTripSummary
+        } else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Unknown HTTPRequestType: \(raw)"
+            ))
+        }
+    }
 
     public var displayName: String {
         switch self {
@@ -22,7 +41,10 @@ public enum HTTPRequestType: String, CaseIterable, Codable, Sendable {
         case .sendCommand: "Send Command"
         case .sendMFA: "Send MFA"
         case .verifyMFA: "Verify MFA"
-        case .fetchEVTripDetails: "Fetch Trip Details"
+        case .fetchEVTripSummary: "Fetch Trip Summary"
+        case .fetchEVTripInfo: "Fetch Trip Info"
+        case .requestSurroundView: "Request Surround View"
+        case .fetchSurroundView: "Fetch Surround View"
         }
     }
 }
@@ -37,16 +59,22 @@ public struct HTTPLog: Identifiable, Codable, Sendable {
     public let responseStatus: Int?, responseHeaders: [String: String]
     public let responseBody: String?, error: String?
     public let apiError: String?, duration: TimeInterval, stackTrace: String?
+    /// VIN of the vehicle this request pertains to, if any. Populated for
+    /// per-vehicle requests (status fetch, commands). Nil for account-wide
+    /// requests (login, fetchVehicles).
+    public let vin: String?
 
     public init(timestamp: Date, accountId: UUID, requestType: HTTPRequestType, method: String, url: String,
                 requestHeaders: [String: String], requestBody: String?, responseStatus: Int?,
                 responseHeaders: [String: String], responseBody: String?, error: String?,
-                apiError: String? = nil, duration: TimeInterval, stackTrace: String? = nil) {
+                apiError: String? = nil, duration: TimeInterval, stackTrace: String? = nil,
+                vin: String? = nil) {
         (self.timestamp, self.accountId, self.requestType, self.method, self.url) =
             (timestamp, accountId, requestType, method, url)
         (self.requestHeaders, self.requestBody, self.responseStatus, self.responseHeaders, self.responseBody) =
             (requestHeaders, requestBody, responseStatus, responseHeaders, responseBody)
         (self.error, self.apiError, self.duration, self.stackTrace) = (error, apiError, duration, stackTrace)
+        self.vin = vin
     }
 
     public var statusText: String {

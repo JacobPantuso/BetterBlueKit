@@ -215,6 +215,37 @@ struct APIClientRedactionTests {
         #expect(result == headers) // Should be unchanged
     }
 
+    @Test("redactHeaders with Canada cookie and transaction headers")
+    func testRedactSensitiveHeadersWithCanadaHeaders() {
+        let headers = [
+            "Cookie": "__cf_bm=secret_cookie",
+            "TransactionId": "txn-12345",
+            "Pauth": "pauth-secret",
+            "Accesstoken": "access-secret",
+            "Content-Type": "application/json"
+        ]
+
+        let result = SensitiveDataRedactor.redactHeaders(headers)
+        #expect(result["Cookie"] == "[REDACTED]")
+        #expect(result["TransactionId"] == "[REDACTED]")
+        #expect(result["Pauth"] == "[REDACTED]")
+        #expect(result["Accesstoken"] == "[REDACTED]")
+        #expect(result["Content-Type"] == "application/json")
+    }
+
+    @Test("redactHeaders with secretkey header")
+    func testRedactSensitiveHeadersWithSecretKey() {
+        let headers = [
+            "secretkey": "sydnat-9kykci-Kuhtep-h5nK",
+            "Content-Type": "application/json"
+        ]
+
+        let result = SensitiveDataRedactor.redactHeaders(headers)
+
+        #expect(result["secretkey"] == "[REDACTED]")
+        #expect(result["Content-Type"] == "application/json")
+    }
+
     @Test("redactHeaders with empty headers")
     func testRedactSensitiveHeadersWithEmptyHeaders() {
         let headers: [String: String] = [:]
@@ -279,12 +310,122 @@ struct APIClientRedactionTests {
         #expect(!result.contains("5YJXCBE29KF000002"))
     }
 
+    @Test("redact phone numbers")
+    func testRedactPhoneNumbers() {
+        let input = """
+        {
+            "phone": "555-123-4567",
+            "phoneNumber": "+1 (555) 123-4567",
+            "mobileNumber": "5551234567",
+            "cellPhone": "555.123.4567",
+            "telematicsPhoneNumber": "6309152282",
+            "number": "6309152282"
+        }
+        """
+
+        let result = SensitiveDataRedactor.redact(input)!
+
+        #expect(!result.contains("555-123-4567"))
+        #expect(!result.contains("+1 (555) 123-4567"))
+        #expect(!result.contains("5551234567"))
+        #expect(!result.contains("555.123.4567"))
+        #expect(!result.contains("6309152282"))
+    }
+
+    @Test("redact account and user IDs")
+    func testRedactAccountAndUserIds() {
+        let input = """
+        {
+            "accountId": "550e8400-e29b-41d4-a716-446655440000",
+            "userId": "user@example.com",
+            "memberId": "MBR123456789",
+            "idmId": "PG1X67TL",
+            "billingAccountNumber": "A01134796",
+            "enrollmentId": "5025321",
+            "nadid": "5235406651",
+            "deviceKey": "B8DEC340-3543-4042-A4AD-9168823C67FA",
+            "deviceid": "B8DEC340-3543-4042-A4AD-9168823C67FA",
+            "clientuuid": "ba6c488d-78fb-5c40-9699-47fa624d06e7"
+        }
+        """
+
+        let result = SensitiveDataRedactor.redact(input)!
+
+        #expect(!result.contains("550e8400-e29b-41d4-a716-446655440000"))
+        #expect(!result.contains("user@example.com"))
+        #expect(!result.contains("MBR123456789"))
+        #expect(!result.contains("PG1X67TL"))
+        #expect(!result.contains("A01134796"))
+        #expect(!result.contains("5025321"))
+        #expect(!result.contains("5235406651"))
+        #expect(!result.contains("B8DEC340-3543-4042-A4AD-9168823C67FA"))
+        #expect(!result.contains("ba6c488d-78fb-5c40-9699-47fa624d06e7"))
+    }
+
+    @Test("redact first and last names")
+    func testRedactNames() {
+        let input = """
+        {
+            "firstName": "Mark",
+            "lastName": "Schmidt"
+        }
+        """
+
+        let result = SensitiveDataRedactor.redact(input)!
+
+        #expect(!result.contains("Mark"))
+        #expect(!result.contains("Schmidt"))
+        #expect(result.contains("[REDACTED]"))
+    }
+
+    @Test("redact emails in additional key formats")
+    func testRedactEmailsInAdditionalKeys() {
+        let input = """
+        {
+            "loginId": "user@example.com",
+            "notificationEmail": "user@example.com"
+        }
+        """
+
+        let result = SensitiveDataRedactor.redact(input)!
+
+        #expect(!result.contains("user@example.com"))
+    }
+
+    @Test("redact emails in URL paths")
+    func testRedactEmailsInURLPaths() {
+        let input = """
+        "url": "https://api.example.com/enrollment/details/user@example.com"
+        """
+
+        let result = SensitiveDataRedactor.redact(input)!
+
+        #expect(!result.contains("user@example.com"))
+        #expect(result.contains("[EMAIL_REDACTED]"))
+    }
+
+    @Test("redact physical address fields")
+    func testRedactAddressFields() {
+        let input = """
+        {
+            "street": "915 Long Drive",
+            "postalCode": "62305"
+        }
+        """
+
+        let result = SensitiveDataRedactor.redact(input)!
+
+        #expect(!result.contains("915 Long Drive"))
+        #expect(!result.contains("62305"))
+    }
+
     @Test("redact regId")
     func testRedactRegId() {
         let input = """
         {
             "regId": "ABC123456789",
-            "regID": "XYZ987654321"
+            "regID": "XYZ987654321",
+            "regid": "H00005447630VKM8KR4AE8PU232649"
         }
         """
 
@@ -293,6 +434,7 @@ struct APIClientRedactionTests {
         #expect(result.contains("[REDACTED]"))
         #expect(!result.contains("ABC123456789"))
         #expect(!result.contains("XYZ987654321"))
+        #expect(!result.contains("H00005447630VKM8KR4AE8PU232649"))
     }
 
     @Test("redact rememberMeToken")
@@ -307,5 +449,107 @@ struct APIClientRedactionTests {
 
         #expect(result.contains("[REDACTED]"))
         #expect(!result.contains("some_long_token_value_here"))
+    }
+}
+
+@Suite("APIClientBase Redaction Tests")
+struct APIClientBaseRedactionTests {
+
+    @MainActor
+    @Test("APIClientBase redacts Hyundai Canada sensitive headers")
+    func testAPIClientBaseRedactsCanadaSensitiveHeaders() {
+        let client = makeCanadaClient()
+        let headers = [
+            "client_secret": "CLISCR01AHSPA",
+            "Pauth": "pauth-secret",
+            "TransactionId": "txn-12345",
+            "Accesstoken": "access-secret",
+            "Content-Type": "application/json"
+        ]
+
+        let result = client.redactSensitiveHeaders(headers)
+
+        #expect(result["client_secret"] == "[REDACTED]")
+        #expect(result["Pauth"] == "[REDACTED]")
+        #expect(result["TransactionId"] == "[REDACTED]")
+        #expect(result["Accesstoken"] == "[REDACTED]")
+        #expect(result["Content-Type"] == "application/json")
+    }
+
+    @MainActor
+    @Test("APIClientBase redacts camelCase token fields in body")
+    func testAPIClientBaseRedactsCamelCaseTokens() {
+        let client = makeCanadaClient()
+        let body = """
+        {"accessToken":"access-token-value","refreshToken":"refresh-token-value","vehicleId":"abc123"}
+        """
+
+        let result = client.redactSensitiveData(in: body)
+
+        #expect(result?.contains(#""accessToken":"[REDACTED]""#) == true)
+        #expect(result?.contains(#""refreshToken":"[REDACTED]""#) == true)
+        #expect(result?.contains("access-token-value") == false)
+        #expect(result?.contains("refresh-token-value") == false)
+        #expect(result?.contains(#""vehicleId":"abc123""#) == true)
+    }
+
+    // MARK: - Device identifier masking
+
+    @Test("Device ids are partially masked so rotation stays visible")
+    func testDeviceIdPartiallyMasked() {
+        let json = #"{"deviceid":"550E8400-E29B-41D4-A716-446655440000","from":"CWP"}"#
+        let result = SensitiveDataRedactor.redact(json)
+
+        // First 8 + last 4 survive so a reader can compare across requests.
+        #expect(result?.contains(#""deviceid":"550E8400…0000""#) == true)
+        // The middle is gone.
+        #expect(result?.contains("E29B-41D4-A716") == false)
+        // Unrelated fields untouched.
+        #expect(result?.contains(#""from":"CWP""#) == true)
+    }
+
+    @Test("Different device ids mask to visibly different values")
+    func testDeviceIdRotationIsDistinguishable() {
+        let first = SensitiveDataRedactor.redact(#"{"deviceid":"AAAA1111-BBBB-2222-CCCC-333344445555"}"#)
+        let second = SensitiveDataRedactor.redact(#"{"deviceid":"ZZZZ9999-YYYY-8888-XXXX-777766665555"}"#)
+
+        // The whole point of masking rather than blanking: a device id that
+        // rotates between logins must not look identical to a stable one.
+        #expect(first != second)
+    }
+
+    @Test("Device ids too short to mask are still fully redacted")
+    func testShortDeviceIdFullyRedacted() {
+        let result = SensitiveDataRedactor.redact(#"{"deviceid":"short"}"#)
+        #expect(result?.contains(#""deviceid":"[REDACTED]""#) == true)
+        #expect(result?.contains("short") == false)
+    }
+
+    @Test("Masking device ids doesn't loosen token or account redaction")
+    func testDeviceMaskingDoesNotLeakOtherIds() {
+        let json = """
+        {"deviceKey":"ABCD1234EFGH5678","accessToken":"550E8400-E29B-41D4-A716-446655440000",\
+        "accountId":"550E8400-E29B-41D4-A716-446655440000","password":"hunter2"}
+        """
+        let result = SensitiveDataRedactor.redact(json)
+
+        #expect(result?.contains(#""deviceKey":"ABCD1234…5678""#) == true)
+        #expect(result?.contains(#""accessToken":"[REDACTED]""#) == true)
+        #expect(result?.contains(#""accountId":"[REDACTED]""#) == true)
+        #expect(result?.contains(#""password":"[REDACTED]""#) == true)
+        #expect(result?.contains("hunter2") == false)
+    }
+
+    @MainActor
+    private func makeCanadaClient() -> HyundaiCanadaAPIClient {
+        let config = APIClientConfiguration(
+            region: .canada,
+            brand: .hyundai,
+            username: "test@example.com",
+            password: "password123",
+            pin: "1234",
+            accountId: UUID()
+        )
+        return HyundaiCanadaAPIClient(configuration: config)
     }
 }

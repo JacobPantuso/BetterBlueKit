@@ -25,12 +25,11 @@ extension HyundaiUSAAPIClient {
         return AuthToken(
             accessToken: accessToken,
             refreshToken: refreshToken,
-            expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn)),
-            pin: pin
+            expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn))
         )
     }
 
-    func parseVehiclesResponse(_ data: Data) throws -> [Vehicle] {
+    package func parseVehiclesResponse(_ data: Data) throws -> [Vehicle] {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let vehicleArray = json["enrolledVehicleDetails"] as? [[String: Any]] else {
             throw APIError.logError("Invalid vehicles response", apiName: apiName)
@@ -56,14 +55,14 @@ extension HyundaiUSAAPIClient {
                 regId: regId,
                 model: nickname,
                 accountId: accountId,
-                isElectric: evStatus == "E",
+                fuelType: evStatus == "E" ? .electric : evStatus == "P" ? .phev : .gas,
                 generation: Int(generation) ?? 1,
                 odometer: odometer
             )
         }
     }
 
-    func parseVehicleStatusResponse(_ data: Data, for vehicle: Vehicle) throws -> VehicleStatus {
+    package func parseVehicleStatusResponse(_ data: Data, for vehicle: Vehicle) throws -> VehicleStatus {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let statusData = json["vehicleStatus"] as? [String: Any] else {
             throw APIError.logError("Invalid status response", apiName: apiName)
@@ -115,16 +114,17 @@ extension HyundaiUSAAPIClient {
         }
     }
 
-    func parseEVTripDetailsResponse(_ data: Data) throws -> [EVTripDetail] {
+    func parseEVTripSummaryResponse(_ data: Data) throws -> [EVTripSummary] {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tripDetails = json["tripdetails"] as? [[String: Any]] else {
             throw APIError(message: "Failed to parse trip details", apiName: apiName)
         }
 
         let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
         dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss.S"
 
-        return tripDetails.compactMap { trip -> EVTripDetail? in
+        return tripDetails.compactMap { trip -> EVTripSummary? in
             guard let distance = trip["distance"] as? Int,
                   let odometerDict = trip["odometer"] as? [String: Any],
                   let odometerValue = odometerDict["value"] as? Double,
@@ -145,9 +145,13 @@ extension HyundaiUSAAPIClient {
                 return nil
             }
 
-            return EVTripDetail(
-                distance: Double(distance),
-                odometer: odometerValue,
+            // The {value, unit} dicts carry the account's unit system (1 = km,
+            // otherwise miles); the bare `distance` field shares it.
+            let units = Distance.Units(odometerDict["unit"] as? Int ?? 3)
+
+            return EVTripSummary(
+                distance: Distance(length: Double(distance), units: units),
+                odometer: Distance(length: odometerValue, units: units),
                 accessoriesEnergy: accessories,
                 totalEnergyUsed: totalUsed,
                 regenEnergy: regen,
@@ -155,7 +159,7 @@ extension HyundaiUSAAPIClient {
                 drivetrainEnergy: drivetrain,
                 batteryCareEnergy: batteryCare,
                 startDate: startDate,
-                durationSeconds: durationValue,
+                duration: .seconds(durationValue),
                 avgSpeed: avgSpeedValue,
                 maxSpeed: maxSpeedValue
             )
@@ -165,7 +169,7 @@ extension HyundaiUSAAPIClient {
     // MARK: - Status Parsing Helpers
 
     private func parseEVStatus(from statusData: [String: Any], vehicle: Vehicle) -> VehicleStatus.EVStatus? {
-        guard vehicle.isElectric,
+        guard vehicle.fuelType.hasElectricCapability,
               let evStatusData = statusData["evStatus"] as? [String: Any] else { return nil }
 
         let ranges = fuelRanges(from: statusData)
@@ -178,10 +182,38 @@ extension HyundaiUSAAPIClient {
         }
 
         let fuelPercentage: Double = extractNumber(from: evStatusData["batteryStatus"]) ?? 0
+        // Trust the API's `unit` field. The Hyundai USA backend has
+        // been observed mislabelling the value (e.g. returning a
+        // kilometre value with unit=3=miles), but the canonical Python
+        // reference (`hyundai_kia_connect_api`) doesn't try to
+        // cross-validate either — and earlier in-tree attempts to do
+        // so wound up "correcting" honest payloads. If users hit
+        // recurring mislabels we can add a per-vehicle unit override
+        // in the settings; for now match the broader ecosystem and
+        // accept the occasional stale-server reading. A refresh in
+        // the app reliably clears it.
         let remainTime2 = evStatusData["remainTime2"] as? [String: Any] ?? [:]
         let atc = remainTime2["atc"] as? [String: Any] ?? [:]
         let chargeTimeMinutes: Int = extractNumber(from: atc["value"]) ?? 0
         let batteryPlugin: Int = extractNumber(from: evStatusData["batteryPlugin"]) ?? 0
+        let charging = evStatusData["batteryCharge"] as? Bool ?? false
+
+        // `realTimePower` is the live charge rate in kW; on AC it equals
+        // `batteryStndChrgPower` (1.4 on an Ioniq 5, kia_uvo#1206; 3.8 on
+        // a Kona, egmp-bluelink-scriptable#63). hyundai_kia_connect_api
+        // switched to it (#1270) because the Standard figure is said to
+        // hold the AC rate through a DC fast charge. pyvisioniq, a logger
+        // reading these same fields, reports the opposite — Standard
+        // reads 0 on DC and the rate arrives in `batteryFstChrgPower` —
+        // so that stays as a floor. No raw US DC payload has turned up to
+        // settle it. Idle payloads seen so far omit `realTimePower` (so
+        // does openHAB's charging US fixture); fall back to Standard.
+        let realTimePower: Double? = extractNumber(from: evStatusData["realTimePower"])
+        let standardPower: Double = extractNumber(from: evStatusData["batteryStndChrgPower"]) ?? 0
+        let fastPower: Double = extractNumber(from: evStatusData["batteryFstChrgPower"]) ?? 0
+        // Only a rate mid-charge, as in the Kia USA parser: #1270
+        // describes the idle Standard figure as stale.
+        let chargeSpeed = charging ? max(realTimePower ?? standardPower, fastPower, 0) : 0
 
         let reserveChargeInfos = evStatusData["reservChargeInfos"] as? [String: Any] ?? [:]
         let targetSocList = reserveChargeInfos["targetSOClist"] as? [[String: Any]] ?? []
@@ -193,11 +225,8 @@ extension HyundaiUSAAPIClient {
         }
 
         return VehicleStatus.EVStatus(
-            charging: evStatusData["batteryCharge"] as? Bool ?? false,
-            chargeSpeed: max(
-                extractNumber(from: evStatusData["batteryStndChrgPower"]) ?? 0,
-                extractNumber(from: evStatusData["batteryFstChrgPower"]) ?? 0
-            ),
+            charging: charging,
+            chargeSpeed: chargeSpeed,
             evRange: VehicleStatus.FuelRange(range: evRange, percentage: fuelPercentage),
             plugType: VehicleStatus.PlugType(fromBatteryPlugin: batteryPlugin),
             chargeTime: .seconds(60 * chargeTimeMinutes),
@@ -212,19 +241,42 @@ extension HyundaiUSAAPIClient {
         return distances.reduce(into: [:]) { dict, distance in
             let type: Int = extractNumber(from: distance["type"]) ?? 0
             let rangeByFuelData = distance["rangeByFuel"] as? [String: Any] ?? [:]
-            let totalRange = rangeByFuelData["totalAvailableRange"] as? [String: Any] ?? [:]
-            dict[FuelType(number: type)] = Distance(
-                length: extractNumber(from: totalRange["value"]) ?? 0,
-                units: Distance.Units(extractNumber(from: totalRange["unit"]) ?? 2)
-            )
+            if let evRange = rangeByFuelData["evModeRange"] as? [String: Any] {
+                dict[FuelType.electric] = Distance(
+                    length: extractNumber(from: evRange["value"]) ?? 0,
+                    units: Distance.Units(extractNumber(from: evRange["unit"]) ?? 2)
+                    )
+            }
+            if let gasRange = rangeByFuelData["gasModeRange"] as? [String: Any] {
+                dict[FuelType.gas] = Distance(
+                    length: extractNumber(from: gasRange["value"]) ?? 0,
+                    units: Distance.Units(extractNumber(from: gasRange["unit"]) ?? 2)
+                )
+            }
+            if let totalRange = rangeByFuelData["totalAvailableRange"] as? [String: Any], dict.isEmpty {
+                dict[FuelType(number: type)] = Distance(
+                    length: extractNumber(from: totalRange["value"]) ?? 0,
+                    units: Distance.Units(extractNumber(from: totalRange["unit"]) ?? 2)
+                )
+            }
         }
     }
 
     private func parseGasRange(from statusData: [String: Any], vehicle: Vehicle) -> VehicleStatus.FuelRange? {
-        guard !vehicle.isElectric,
-              let fuelLevel: Double = extractNumber(from: statusData["fuelLevel"]),
-              let gasRange = fuelRanges(from: statusData)[.gas] else { return nil }
-        return VehicleStatus.FuelRange(range: gasRange, percentage: fuelLevel)
+        // Pure EVs don't have gas range — skip to avoid misinterpreting dte/fuelLevel fields
+        guard vehicle.fuelType != .electric else { return nil }
+        guard let percentage: Double = extractNumber(from: statusData["fuelLevel"]) else { return nil }
+
+        // Gas range can be in two places: evStatus rangeByFuel section or dte field
+        if let gasRange = fuelRanges(from: statusData)[.gas] {
+            return VehicleStatus.FuelRange(range: gasRange, percentage: percentage)
+        } else if let dte = statusData["dte"] as? [String: Any],
+                  let gasRange: Double = extractNumber(from: dte["value"]) {
+            let units = Distance.Units(extractNumber(from: dte["unit"]) ?? 2)
+            return VehicleStatus.FuelRange(range: Distance(length: gasRange, units: units), percentage: percentage)
+        } else {
+            return nil
+        }
     }
 
     private func parseLocation(from statusData: [String: Any]) -> VehicleStatus.Location {

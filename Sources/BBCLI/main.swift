@@ -6,6 +6,7 @@
 //
 
 import BetterBlueKit
+import Dispatch
 import Foundation
 
 // MARK: - CLI State
@@ -19,13 +20,27 @@ final class CLIState {
     var username: String = ""
     var password: String = ""
     var pin: String = ""
+    var refreshToken: String = ""
 
     var brand: Brand = .hyundai
     var region: Region = .usa
-}
+    var redactPII: Bool = false
 
-@MainActor
-let state = CLIState()
+    /// This account's persisted device id and tokens.
+    var session = CLISession()
+    /// Set by `--forget`: clear the saved session instead of using it.
+    var forgetSession = false
+
+    /// Mutates the session and writes it straight through.
+    ///
+    /// Flushed immediately rather than at exit on purpose: the device id
+    /// and remember-me token are what the backend recognizes next launch,
+    /// and losing them to a crash or a Ctrl-C means another MFA prompt.
+    func updateSession(_ mutate: (inout CLISession) -> Void) {
+        mutate(&session)
+        SessionStore.save(session, brand: brand, region: region, username: username)
+    }
+}
 
 // MARK: - Helpers
 
@@ -53,10 +68,25 @@ func prompt(_ message: String) -> String {
     return readLine() ?? ""
 }
 
+func prettyPrintJSON(_ jsonString: String) -> String {
+    guard let data = jsonString.data(using: .utf8),
+          let json = try? JSONSerialization.jsonObject(with: data),
+          let prettyData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]),
+          let prettyString = String(data: prettyData, encoding: .utf8) else {
+        return jsonString
+    }
+    return prettyString
+}
+
+func redactVIN(_ vin: String) -> String {
+    guard vin.count > 6 else { return "[REDACTED]" }
+    return String(vin.prefix(3)) + String(repeating: "*", count: vin.count - 6) + String(vin.suffix(3))
+}
+
 // MARK: - Argument Parsing
 
 @MainActor
-func parseArguments() {
+func parseArguments(state: CLIState) {
     let args = CommandLine.arguments
     var argIndex = 1
 
@@ -70,6 +100,11 @@ func parseArguments() {
         case "-p", "--password":
             if argIndex + 1 < args.count {
                 state.password = args[argIndex + 1]
+                argIndex += 1
+            }
+        case "-rt", "--token":
+            if argIndex + 1 < args.count {
+                state.refreshToken = args[argIndex + 1]
                 argIndex += 1
             }
         case "--pin":
@@ -91,7 +126,6 @@ func parseArguments() {
         case "-r", "--region":
             if argIndex + 1 < args.count {
                 let regionArg = args[argIndex + 1]
-                print("Region arg: '\(regionArg)'")
                 if let parsedRegion = Region(rawValue: regionArg.uppercased()) {
                     state.region = parsedRegion
                 } else {
@@ -100,6 +134,10 @@ func parseArguments() {
                 }
                 argIndex += 1
             }
+        case "--forget":
+            state.forgetSession = true
+        case "--no-redaction":
+            state.redactPII = false
         case "-h", "--help":
             printUsage()
             exit(0)
@@ -115,129 +153,47 @@ func printUsage() {
     BetterBlueKit CLI - Test tool for Hyundai/Kia API
 
     Usage: bbcli [OPTIONS]
+           bbcli parse [OPTIONS] <json-string-or-file>
 
-    Options:
+    Interactive Mode Options:
       -u, --username <email>    Account username/email
       -p, --password <pass>     Account password
+      -rt, --token <token>      Account refresh token (optional, no password in case of use needed)
       --pin <pin>               Vehicle PIN (required for Hyundai)
       -b, --brand <brand>       Brand: 'hyundai' or 'kia' (default: hyundai)
       -r, --region <region>     Region: 'USA', 'Canada', 'Europe' (default: USA)
+      --no-redaction            Disable PII redaction in HTTP logs
+      --forget                  Discard the saved session for this account and log in fresh
       -h, --help                Show this help message
 
-    If credentials are not provided via arguments, you will be prompted.
+    Parse Mode:
+      bbcli parse -b <brand> -r <region> -t <type> [--vin <vin>] [--electric] <json>
+
+      Parses a raw API response JSON and outputs the parsed BetterBlueKit struct.
+
+      -t, --type <type>         Parse type: 'vehicles', 'vehicleStatus', or 'surroundView'
+      --vin <vin>               VIN for vehicleStatus parsing (default: TESTVIN0000000000)
+      --electric                Mark vehicle as electric for parsing (auto-detected from
+                                evStatus field in vehicles response if not specified)
+      <json>                    JSON string or path to a JSON file (last argument)
+
+      If the JSON contains a top-level "responseBody" key, it will be automatically
+      unwrapped before parsing.
 
     Examples:
       bbcli -u user@email.com -p password --pin 1234 -b hyundai
       bbcli -b kia -u user@email.com -p password
+      bbcli parse -b hyundai -r US -t vehicleStatus response.json
+      bbcli parse -b hyundai -r US -t vehicleStatus '{"vehicleStatus": {...}}'
+      bbcli parse -b kia -r US -t vehicles --electric response.json
+      bbcli parse -b hyundai -r CA -t surroundView lastmcrsvm.json
     """)
-}
-
-// MARK: - Login Flow
-
-@MainActor
-func performLogin() async throws {
-    let brand = state.brand
-    let region = state.region
-    let username = state.username
-    let password = state.password
-    let pin = state.pin
-
-    printHeader("Login")
-    print("Brand: \(brand.displayName)")
-    print("Region: \(region.rawValue)")
-    print("Username: \(username)")
-    print("")
-
-    let config = APIClientConfiguration(
-        region: region,
-        brand: brand,
-        username: username,
-        password: password,
-        pin: pin,
-        accountId: UUID()
-    )
-
-    let client: any APIClientProtocol
-    do {
-        client = try createBetterBlueKitAPIClient(configuration: config)
-    } catch let error as RegionSupportError {
-        printError(error.localizedDescription)
-        exit(1)
-    }
-
-    state.client = client
-
-    do {
-        print("Attempting login...")
-        let token = try await client.login()
-        state.authToken = token
-        printSuccess("Login successful!")
-        print("Auth token received (expires: \(token.expiresAt))")
-    } catch let error as APIError {
-        if error.errorType == .requiresMFA, client.supportsMFA() {
-            try await handleMFA(client: client, error: error)
-        } else {
-            throw error
-        }
-    }
-}
-
-@MainActor
-func handleMFA(client: any APIClientProtocol, error: APIError) async throws {
-    printSubheader("MFA Required")
-
-    guard let userInfo = error.userInfo else {
-        throw APIError(message: "MFA required but no user info provided")
-    }
-
-    let xid = userInfo["xid"] ?? ""
-    let otpKey = userInfo["otpKey"] ?? ""
-    let email = userInfo["email"]
-    let phone = userInfo["phone"]
-
-    print("Available MFA methods:")
-    if let email = email {
-        print("  1. Email: \(email)")
-    }
-    if let phone = phone {
-        print("  2. Phone: \(phone)")
-    }
-
-    let methodChoice = prompt("Select method (1 for email, 2 for phone): ")
-    let method: MFAMethod = methodChoice == "2" ? .sms : .email
-
-    print("Sending MFA code via \(method)...")
-    try await client.sendMFACode(xid: xid, otpKey: otpKey, method: method)
-    printSuccess("MFA code sent!")
-
-    let rawCode = prompt("Enter verification code: ")
-    // Filter to digits only - OTP codes are always numeric, and terminal escape sequences
-    // can sometimes be captured by readLine()
-    let code = rawCode.filter { $0.isNumber }
-
-    if code.isEmpty {
-        throw APIError(message: "No verification code entered")
-    }
-
-    if code != rawCode {
-        print("Note: Cleaned input from '\\(rawCode)' to '\\(code)'")
-    }
-
-    print("Verifying MFA code...")
-    let (rmToken, sid) = try await client.verifyMFACode(xid: xid, otpKey: otpKey, code: code)
-    printSuccess("MFA verification successful!")
-
-    print("Completing login...")
-    let token = try await client.completeMFALogin(sid: sid, rmToken: rmToken)
-    state.authToken = token
-    printSuccess("Login completed!")
-    print("Auth token received (expires: \(token.expiresAt))")
 }
 
 // MARK: - API Commands
 
 @MainActor
-func fetchVehicles() async throws {
+func fetchVehicles(state: CLIState) async throws {
     printSubheader("Fetching Vehicles")
 
     guard let token = state.authToken else {
@@ -254,28 +210,21 @@ func fetchVehicles() async throws {
     printSuccess("Found \(vehicles.count) vehicle(s)")
 
     for (index, vehicle) in vehicles.enumerated() {
+        let displayVIN = state.redactPII ? redactVIN(vehicle.vin) : vehicle.vin
         print("\n[\(index + 1)] \(vehicle.model)")
-        print("    VIN: \(vehicle.vin)")
+        print("    VIN: \(displayVIN)")
         print("    Model: \(vehicle.model)")
-        print("    Electric: \(vehicle.isElectric)")
+        print("    Fuel Type: \(vehicle.fuelType.rawValue)")
         print("    Generation: \(vehicle.generation)")
         if let key = vehicle.vehicleKey {
-            print("    Vehicle Key: \(key)")
-        }
-
-        // Print as JSON
-        printSubheader("Vehicle \(index + 1) JSON")
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let jsonData = try? encoder.encode(vehicle),
-           let jsonString = String(data: jsonData, encoding: .utf8) {
-            print(jsonString)
+            let displayKey = state.redactPII ? "[REDACTED]" : key
+            print("    Vehicle Key: \(displayKey)")
         }
     }
 }
 
 @MainActor
-func selectVehicle() -> Vehicle? {
+func selectVehicle(state: CLIState) -> Vehicle? {
     let vehicles = state.vehicles
 
     if vehicles.isEmpty {
@@ -289,7 +238,8 @@ func selectVehicle() -> Vehicle? {
 
     print("\nSelect a vehicle:")
     for (index, vehicle) in vehicles.enumerated() {
-        print("  \(index + 1). \(vehicle.model) (\(vehicle.vin))")
+        let displayVIN = state.redactPII ? redactVIN(vehicle.vin) : vehicle.vin
+        print("  \(index + 1). \(vehicle.model) (\(displayVIN))")
     }
 
     let choice = prompt("Vehicle number: ")
@@ -302,8 +252,8 @@ func selectVehicle() -> Vehicle? {
 }
 
 @MainActor
-func fetchVehicleStatus() async throws {
-    guard let vehicle = selectVehicle() else { return }
+func fetchVehicleStatus(state: CLIState) async throws {
+    guard let vehicle = selectVehicle(state: state) else { return }
     guard let token = state.authToken else {
         throw APIError(message: "Not logged in")
     }
@@ -314,7 +264,10 @@ func fetchVehicleStatus() async throws {
 
     printSubheader("Fetching Status for \(vehicle.model)")
 
-    let status = try await client.fetchVehicleStatus(for: vehicle, authToken: token)
+    // cached: false → wake the car and read fresh state. On EU CCS2 vehicles
+    // this adds a ~20s wait but is the only way to see a just-sent command
+    // (e.g. climate) actually reflected, instead of a stale cached snapshot.
+    let status = try await client.fetchVehicleStatus(for: vehicle, authToken: token, cached: false)
 
     printSuccess("Status fetched successfully")
 
@@ -343,20 +296,11 @@ func fetchVehicleStatus() async throws {
         print("     Fuel: \(Int(gasRange.percentage))%")
         print("     Range: \(Int(gasRange.range.length)) \(gasRange.range.units == .miles ? "mi" : "km")")
     }
-
-    // Print as JSON
-    printSubheader("Status JSON")
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    if let jsonData = try? encoder.encode(status),
-       let jsonString = String(data: jsonData, encoding: .utf8) {
-        print(jsonString)
-    }
 }
 
 @MainActor
-func sendCommand(_ command: VehicleCommand, description: String) async throws {
-    guard let vehicle = selectVehicle() else { return }
+func sendCommand(_ command: VehicleCommand, description: String, state: CLIState) async throws {
+    guard let vehicle = selectVehicle(state: state) else { return }
     guard let token = state.authToken else {
         throw APIError(message: "Not logged in")
     }
@@ -373,8 +317,8 @@ func sendCommand(_ command: VehicleCommand, description: String) async throws {
 }
 
 @MainActor
-func fetchEVTripDetails() async throws {
-    guard let vehicle = selectVehicle() else { return }
+func fetchEVTripSummary(state: CLIState) async throws {
+    guard let vehicle = selectVehicle(state: state) else { return }
     guard let token = state.authToken else {
         throw APIError(message: "Not logged in")
     }
@@ -383,29 +327,58 @@ func fetchEVTripDetails() async throws {
         throw APIError(message: "No API client initialized")
     }
 
-    printSubheader("Fetching EV Trip Details for \(vehicle.model)")
+    printSubheader("Fetching EV Trip Summary for \(vehicle.model)")
 
-    let trips = try await client.fetchEVTripDetails(for: vehicle, authToken: token) ?? []
+    let trips = try await client.fetchEVTripSummary(for: vehicle, authToken: token) ?? []
 
     printSuccess("Found \(trips.count) trip(s)")
 
     for (index, trip) in trips.prefix(5).enumerated() {
         print("\n[\(index + 1)] Trip on \(trip.startDate)")
-        print("    Distance: \(trip.distance) mi")
+        print("    Distance: \(trip.distance.length) \(trip.distance.units.abbreviation)")
         print("    Duration: \(trip.formattedDuration)")
         print("    Energy Used: \(Double(trip.totalEnergyUsed) / 1000.0) kWh")
     }
+}
 
-    // Print first trip as JSON
-    if let firstTrip = trips.first {
-        printSubheader("First Trip JSON")
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        if let jsonData = try? encoder.encode(firstTrip),
-           let jsonString = String(data: jsonData, encoding: .utf8) {
-            print(jsonString)
-        }
+@MainActor
+func fetchEVTripInfo(state: CLIState) async throws {
+    guard let vehicle = selectVehicle(state: state) else { return }
+    guard let token = state.authToken else {
+        throw APIError(message: "Not logged in")
+    }
+
+    guard let client = state.client else {
+        throw APIError(message: "No API client initialized")
+    }
+
+    let dateString = prompt("Enter date (yyyyMMdd): ")
+    guard !dateString.isEmpty else { return }
+
+    let dateFormatter = DateFormatter()
+    dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+    dateFormatter.dateFormat = "yyyyMMdd"
+    guard let date = dateFormatter.date(from: dateString) else {
+        printError("Invalid date format")
+        return
+    }
+
+    printSubheader("Fetching EV Trip Info for \(vehicle.model) on \(dateString)")
+
+    let trips = try await client.fetchEVTripInfo(for: vehicle, authToken: token, date: date) ?? []
+
+    printSuccess("Found \(trips.count) individual trip(s) for the day")
+
+    for (index, info) in trips.enumerated() {
+        print("\n[\(index + 1)] Time: \(info.date)")
+        print("    Distance: \(info.distance.length) \(info.distance.units.abbreviation)")
+
+        let driveTimeMinutes = info.driveTime.components.seconds / 60
+        let idleTimeMinutes = info.idleTime.components.seconds / 60
+        print("    Drive Time: \(driveTimeMinutes) min")
+        print("    Idle Time: \(idleTimeMinutes) min")
+        print("    Avg Speed: \(info.avgSpeed)")
+        print("    Max Speed: \(info.maxSpeed)")
     }
 }
 
@@ -426,59 +399,96 @@ func showMenu() {
       7. Start Charge
       8. Stop Charge
       9. Set Charge Limits
-     10. Fetch EV Trip Details
+     10. Fetch EV Trip Summary
+     11. Fetch EV Trip Info
+     12. Request Surround View Capture
+     13. Fetch Surround View Images
+     14. Probe Vehicle Features (Kia US)
+     15. Probe 360 View Trigger (Kia US)
+     16. Confirm 360 View Trigger (Kia US)
       0. Exit
 
     """)
 }
 
+/// Prompts for climate options, then starts climate. Extracted from the
+/// menu dispatch verbatim — the prompting is why case 5 was multi-line.
 @MainActor
-func runInteractiveLoop() async {
+func promptAndStartClimate(state: CLIState) async throws {
+    print("Climate options (press Enter for defaults):")
+    let tempStr = prompt("Temperature (default 72°F): ")
+    let temp = Double(tempStr) ?? 72.0
+    var options = ClimateOptions()
+    options.temperature = Temperature(value: temp, units: .fahrenheit)
+    try await sendCommand(.startClimate(options), description: "Start Climate", state: state)
+}
+
+/// Prompts for AC/DC charge limits, then applies them.
+@MainActor
+func promptAndSetChargeLimits(state: CLIState) async throws {
+    let acStr = prompt("AC Charge Limit (50-100): ")
+    let dcStr = prompt("DC Charge Limit (50-100): ")
+    let acLimit = Int(acStr) ?? 80
+    let dcLimit = Int(dcStr) ?? 80
+    try await sendCommand(
+        .setTargetSOC(acLevel: acLimit, dcLevel: dcLimit),
+        description: "Set Charge Limits",
+        state: state
+    )
+}
+
+/// Runs one menu selection. Split out of `runInteractiveLoop` so the
+/// dispatch table can keep growing without the loop tripping SwiftLint's
+/// cyclomatic-complexity cap — the loop owns prompting and error
+/// reporting, this owns "which command".
+///
+/// Returns false when the user asked to quit.
+@MainActor
+func runMenuChoice(_ choice: String, state: CLIState) async throws -> Bool {
+    switch choice {
+    case "1": try await fetchVehicles(state: state)
+    case "2": try await fetchVehicleStatus(state: state)
+    case "3": try await sendCommand(.lock, description: "Lock", state: state)
+    case "4": try await sendCommand(.unlock, description: "Unlock", state: state)
+    case "5": try await promptAndStartClimate(state: state)
+    case "6": try await sendCommand(.stopClimate, description: "Stop Climate", state: state)
+    case "7": try await sendCommand(.startCharge, description: "Start Charge", state: state)
+    case "8": try await sendCommand(.stopCharge, description: "Stop Charge", state: state)
+    case "9": try await promptAndSetChargeLimits(state: state)
+    case "10": try await fetchEVTripSummary(state: state)
+    case "11": try await fetchEVTripInfo(state: state)
+    case "12": try await requestSurroundView(state: state)
+    case "13": try await fetchSurroundView(state: state)
+    case "14": try await probeVehicleFeatures(state: state)
+    case "15": try await probeSurroundViewTrigger(state: state)
+    case "16": try await confirmSurroundViewTrigger(state: state)
+    case "0", "q", "quit", "exit":
+        print("\nGoodbye!")
+        return false
+    default:
+        printError("Invalid command")
+    }
+    return true
+}
+
+@MainActor
+func runInteractiveLoop(state: CLIState) async {
     while true {
         showMenu()
         let choice = prompt("Enter command number: ")
 
         do {
-            switch choice {
-            case "1":
-                try await fetchVehicles()
-            case "2":
-                try await fetchVehicleStatus()
-            case "3":
-                try await sendCommand(.lock, description: "Lock")
-            case "4":
-                try await sendCommand(.unlock, description: "Unlock")
-            case "5":
-                print("Climate options (press Enter for defaults):")
-                let tempStr = prompt("Temperature (default 72°F): ")
-                let temp = Double(tempStr) ?? 72.0
-                var options = ClimateOptions()
-                options.temperature = Temperature(value: temp, units: .fahrenheit)
-                try await sendCommand(.startClimate(options), description: "Start Climate")
-            case "6":
-                try await sendCommand(.stopClimate, description: "Stop Climate")
-            case "7":
-                try await sendCommand(.startCharge, description: "Start Charge")
-            case "8":
-                try await sendCommand(.stopCharge, description: "Stop Charge")
-            case "9":
-                let acStr = prompt("AC Charge Limit (50-100): ")
-                let dcStr = prompt("DC Charge Limit (50-100): ")
-                let acLimit = Int(acStr) ?? 80
-                let dcLimit = Int(dcStr) ?? 80
-                try await sendCommand(.setTargetSOC(acLevel: acLimit, dcLevel: dcLimit), description: "Set Charge Limits")
-            case "10":
-                try await fetchEVTripDetails()
-            case "0", "q", "quit", "exit":
-                print("\nGoodbye!")
-                return
-            default:
-                printError("Invalid command")
-            }
+            guard try await runMenuChoice(choice, state: state) else { return }
         } catch let error as APIError {
             printError("\(error.errorType): \(error.message)")
             if let userInfo = error.userInfo {
                 print("User Info: \(userInfo)")
+            }
+            // A reused session the server has since invalidated fails on
+            // every command with no obvious way out — unlike the app, the
+            // CLI has no re-authenticate-and-retry. Point at the exit.
+            if error.errorType == .invalidVehicleSession || error.errorType == .invalidCredentials {
+                print("\nThe saved session looks stale. Re-run with `--forget` to log in fresh.")
             }
         } catch {
             printError(error.localizedDescription)
@@ -489,40 +499,300 @@ func runInteractiveLoop() async {
     }
 }
 
-// MARK: - Main
+// MARK: - Parse Mode
 
-@main
-struct BBCLI {
-    @MainActor
-    static func main() async {
-        parseArguments()
+enum ParseType: String {
+    case vehicles
+    case vehicleStatus
+    case surroundView
+}
 
-        // Prompt for missing credentials
-        if state.username.isEmpty {
-            state.username = prompt("Username/Email: ")
-        }
-        if state.password.isEmpty {
-            state.password = prompt("Password: ")
-        }
-        if state.brand == .hyundai && state.pin.isEmpty {
-            let rawPin = prompt("PIN: ")
-            // Filter to digits only - PIN should be numeric
-            state.pin = rawPin.filter { $0.isNumber }
-        }
+struct ParseOptions {
+    var brand: Brand = .hyundai
+    var region: Region = .usa
+    var parseType: ParseType?
+    var vin: String = "TESTVIN0000000000"
+    var fuelType: FuelType?  // nil = auto-detect
+    var jsonInput: String?
+}
 
-        // Perform login
-        do {
-            try await performLogin()
-            await runInteractiveLoop()
-        } catch let error as APIError {
-            printError("\(error.errorType): \(error.message)")
-            if let userInfo = error.userInfo {
-                print("User Info: \(userInfo)")
+func parseParseArguments() -> ParseOptions {
+    let args = CommandLine.arguments
+    var options = ParseOptions()
+    var argIndex = 2  // Skip "bbcli" and "parse"
+
+    while argIndex < args.count {
+        switch args[argIndex] {
+        case "-b", "--brand":
+            if argIndex + 1 < args.count {
+                let brandArg = args[argIndex + 1].lowercased()
+                if let brand = Brand(rawValue: brandArg) {
+                    options.brand = brand
+                } else {
+                    printError("Unknown brand: \(args[argIndex + 1]). Use 'hyundai' or 'kia'.")
+                    exit(1)
+                }
+                argIndex += 1
             }
-            exit(1)
-        } catch {
-            printError(error.localizedDescription)
-            exit(1)
+        case "-r", "--region":
+            if argIndex + 1 < args.count {
+                let regionArg = args[argIndex + 1]
+                if let parsedRegion = Region(rawValue: regionArg.uppercased()) {
+                    options.region = parsedRegion
+                } else {
+                    printError("Unknown region: \(args[argIndex + 1]). Use \(Region.allCases.map { $0.rawValue }).")
+                    exit(1)
+                }
+                argIndex += 1
+            }
+        case "-t", "--type":
+            if argIndex + 1 < args.count {
+                let typeArg = args[argIndex + 1]
+                switch typeArg.lowercased() {
+                case "vehicles":
+                    options.parseType = .vehicles
+                case "vehiclestatus", "status":
+                    options.parseType = .vehicleStatus
+                case "surroundview", "svm":
+                    options.parseType = .surroundView
+                default:
+                    printError("Unknown parse type: \(typeArg). Use 'vehicles', 'vehicleStatus', or 'surroundView'.")
+                    exit(1)
+                }
+                argIndex += 1
+            }
+        case "--vin":
+            if argIndex + 1 < args.count {
+                options.vin = args[argIndex + 1]
+                argIndex += 1
+            }
+        case "--electric":
+            options.fuelType = .electric
+        case "-h", "--help":
+            printUsage()
+            exit(0)
+        default:
+            // Last unknown argument is the JSON input
+            options.jsonInput = args[argIndex]
         }
+        argIndex += 1
+    }
+
+    return options
+}
+
+func loadJSONData(from input: String) throws -> Data {
+    // Check if it's a file path
+    let fileManager = FileManager.default
+    let path = (input as NSString).expandingTildeInPath
+    if fileManager.fileExists(atPath: path) {
+        print("Reading JSON from file: \(path)")
+        return try Data(contentsOf: URL(fileURLWithPath: path))
+    }
+
+    // Try as raw JSON string
+    guard let data = input.data(using: .utf8) else {
+        throw APIError(message: "Could not convert input to data")
+    }
+
+    // Validate it's actually JSON
+    guard (try? JSONSerialization.jsonObject(with: data)) != nil else {
+        throw APIError(message: "Input is neither a valid file path nor valid JSON")
+    }
+
+    return data
+}
+
+/// Unwraps a `{"responseBody": {...}}` wrapper if present, returning the inner data.
+func unwrapResponseBody(_ data: Data) -> Data {
+    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let responseBody = json["responseBody"],
+          json.count <= 2  // responseBody + maybe one other key like "responseHeader"
+    else {
+        return data
+    }
+
+    if let unwrapped = try? JSONSerialization.data(withJSONObject: responseBody) {
+        print("Auto-unwrapped 'responseBody' wrapper")
+        return unwrapped
+    }
+    return data
+}
+
+func encodePrettyJSON<T: Encodable>(_ value: T) -> String {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    encoder.dateEncodingStrategy = .iso8601
+    guard let data = try? encoder.encode(value),
+          let string = String(data: data, encoding: .utf8) else {
+        return "\(value)"
+    }
+    return string
+}
+
+@MainActor
+func runParseMode() async -> Int32 {
+    let options = parseParseArguments()
+
+    guard let parseType = options.parseType else {
+        printError("Parse type is required. Use -t vehicles or -t vehicleStatus")
+        return 1
+    }
+
+    guard let jsonInput = options.jsonInput else {
+        printError("JSON input is required (JSON string or path to file)")
+        return 1
+    }
+
+    do {
+        let rawData = try loadJSONData(from: jsonInput)
+        let data = unwrapResponseBody(rawData)
+
+        // Create a dummy API client for parsing
+        let config = APIClientConfiguration(
+            region: options.region,
+            brand: options.brand,
+            username: "parse-mode",
+            password: "",
+            pin: "",
+            accountId: UUID()
+        )
+
+        let client = try createBetterBlueKitAPIClient(configuration: config)
+
+        printHeader("Parsing \(parseType.rawValue) (\(options.brand.displayName) \(options.region.rawValue))")
+
+        switch parseType {
+        case .vehicles:
+            let vehicles = try parseVehicles(client: client, data: data, options: options)
+            printSuccess("Parsed \(vehicles.count) vehicle(s)")
+            print(encodePrettyJSON(vehicles))
+
+        case .vehicleStatus:
+            let fuelType = options.fuelType ?? .gas
+            let vehicle = Vehicle(
+                vin: options.vin,
+                regId: "parse-mode",
+                model: "parse-mode",
+                accountId: UUID(),
+                fuelType: fuelType,
+                generation: 2,
+                odometer: Distance(length: 0, units: .miles)
+            )
+            let status = try parseVehicleStatus(client: client, data: data, vehicle: vehicle)
+            printSuccess("Parsed vehicle status")
+            print(encodePrettyJSON(status))
+
+        case .surroundView:
+            let vehicle = Vehicle(
+                vin: options.vin,
+                regId: "parse-mode",
+                model: "parse-mode",
+                accountId: UUID(),
+                fuelType: options.fuelType ?? .gas,
+                generation: 2,
+                odometer: Distance(length: 0, units: .miles)
+            )
+            let captures = try parseSurroundView(client: client, data: data, vehicle: vehicle)
+            printSuccess("Parsed \(captures.count) surround view capture(s)")
+            try describeSurroundViewCaptures(captures)
+        }
+
+        return 0
+    } catch let error as APIError {
+        printError("\(error.errorType): \(error.message)")
+        return 1
+    } catch {
+        printError(error.localizedDescription)
+        return 1
     }
 }
+
+@MainActor
+func parseVehicles(client: any APIClientProtocol, data: Data, options: ParseOptions) throws -> [Vehicle] {
+    if let hyundaiUSA = client as? HyundaiUSAAPIClient {
+        return try hyundaiUSA.parseVehiclesResponse(data)
+    } else if let hyundaiCanada = client as? HyundaiCanadaAPIClient {
+        return try hyundaiCanada.parseCanadaVehiclesResponse(data)
+    } else if let hyundaiEurope = client as? HyundaiEuropeAPIClient {
+        return try hyundaiEurope.parseVehiclesResponse(data)
+    } else if let kiaUSA = client as? KiaUSAAPIClient {
+        return try kiaUSA.parseVehiclesResponse(data)
+    } else {
+        throw APIError(message: "Unsupported client type for vehicle parsing")
+    }
+}
+
+@MainActor
+func parseVehicleStatus(client: any APIClientProtocol, data: Data, vehicle: Vehicle) throws -> VehicleStatus {
+    if let hyundaiUSA = client as? HyundaiUSAAPIClient {
+        return try hyundaiUSA.parseVehicleStatusResponse(data, for: vehicle)
+    } else if let hyundaiCanada = client as? HyundaiCanadaAPIClient {
+        return try hyundaiCanada.parseCanadaVehicleStatusResponse(data, for: vehicle)
+    } else if let hyundaiEurope = client as? HyundaiEuropeAPIClient {
+        return try hyundaiEurope.parseVehicleStatusResponse(data, nil, for: vehicle)
+    } else if let kiaUSA = client as? KiaUSAAPIClient {
+        return try kiaUSA.parseVehicleStatusResponse(data, for: vehicle)
+    } else {
+        throw APIError(message: "Unsupported client type for status parsing")
+    }
+}
+
+// MARK: - Main
+
+@MainActor
+func runCLI() async -> Int32 {
+    let state = CLIState()
+    parseArguments(state: state)
+
+    // Prompt for missing credentials
+    if state.username.isEmpty {
+        state.username = prompt("Username/Email: ")
+    }
+    if state.password.isEmpty && state.refreshToken.isEmpty {
+        state.password = prompt("Password: ")
+    }
+    if state.password.isEmpty && state.refreshToken.isEmpty {
+        state.refreshToken = prompt("Refresh Token: ")
+    }
+    if state.brand == .hyundai && state.pin.isEmpty {
+        let rawPin = prompt("PIN: ")
+        // Filter to digits only - PIN should be numeric
+        state.pin = rawPin.filter { $0.isNumber }
+    }
+
+    if state.forgetSession {
+        SessionStore.clear(brand: state.brand, region: state.region, username: state.username)
+        printSuccess("Cleared the saved session for \(state.username).")
+        print("A new device id will be registered on the next login, so expect one MFA prompt.")
+    }
+
+    // Perform login
+    do {
+        try await performLogin(state: state)
+        await runInteractiveLoop(state: state)
+        return 0
+    } catch let error as APIError {
+        printError("\(error.errorType): \(error.message)")
+        if let userInfo = error.userInfo {
+            print("User Info: \(userInfo)")
+        }
+        return 1
+    } catch {
+        printError(error.localizedDescription)
+        return 1
+    }
+}
+
+Task { @MainActor in
+    // Check if first argument is "parse" subcommand
+    let exitCode: Int32
+    if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "parse" {
+        exitCode = await runParseMode()
+    } else {
+        exitCode = await runCLI()
+    }
+    exit(exitCode)
+}
+
+dispatchMain()

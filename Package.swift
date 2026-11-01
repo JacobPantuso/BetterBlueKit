@@ -9,31 +9,42 @@ let package = Package(
         .watchOS(.v11)
     ],
     products: [
-        // Only expose the library as a product.
-        // BBCLI is kept as an internal executable target for development/testing
-        // and can be built via `swift build` but won't be compiled when the
-        // package is used as a dependency.
         .library(
             name: "BetterBlueKit",
             targets: ["BetterBlueKit"]
+        ),
+        .executable(
+            name: "bbcli",
+            targets: ["bbcli"]
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/SimplyDanny/SwiftLintPlugins", from: "0.61.0")
+        // Commented out for local-package use: the SwiftLint build tool
+        // plugin conflicts with the main BetterBlue project build.
+        // Uncomment when pushing upstream to the standalone repo.
+        // .package(url: "https://github.com/SimplyDanny/SwiftLintPlugins", from: "0.61.0")
     ],
     targets: [
         .target(
             name: "BetterBlueKit",
             dependencies: [],
             path: "Sources/BetterBlueKit",
+            resources: [
+                // Bundles the shared troubleshooting document so the main
+                // app and Watch app can both surface it in-UI via
+                // `TroubleshootingDocument.markdown`. The file at the
+                // repo root is a symlink to the same source so GitHub
+                // renders it at its standard location.
+                .process("Resources")
+            ],
             swiftSettings: [
                 .define("DEBUG", .when(configuration: .debug)),
                 .define("RELEASE", .when(configuration: .release))
             ],
-            plugins: [.plugin(name: "SwiftLintBuildToolPlugin", package: "SwiftLintPlugins")],
+            // plugins: [.plugin(name: "SwiftLintBuildToolPlugin", package: "SwiftLintPlugins")],
         ),
         .executableTarget(
-            name: "BBCLI",
+            name: "bbcli",
             dependencies: ["BetterBlueKit"],
             path: "Sources/BBCLI"
         ),

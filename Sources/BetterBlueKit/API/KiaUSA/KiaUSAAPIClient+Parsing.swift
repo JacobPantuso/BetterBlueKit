@@ -53,18 +53,33 @@ extension KiaUSAAPIClient {
             throw APIError.logError("Login response missing session ID header", apiName: apiName)
         }
 
-        let validUntil = Date().addingTimeInterval(3600)
+        // Match the Python `hyundai_kia_connect_api` reference, which uses
+        // 23 hours. The previous 1-hour value forced ~23x more `authUser`
+        // calls than the reference for the same user activity, which
+        // appears to be why the rmToken-based re-login eventually trips
+        // Kia's anti-fraud heuristics and demands MFA again.
+        let validUntil = Date().addingTimeInterval(KiaUSAAPIClient.loginTokenLifetime)
         BBLogger.info(.auth, "KiaUSA: Authentication completed successfully for user \(username)")
+
+        // Capture any rotated `rmToken` the server included in the
+        // response and hand it back to the caller. Kia hasn't been
+        // observed to rotate this on every successful `authUser`, but
+        // the cost of capturing is tiny and it's the kind of bug that
+        // would otherwise look indistinguishable from a flaky session.
+        let rotatedRmToken = headers["rmToken"] ?? headers["rmtoken"] ?? headers["RmToken"]
+        if let rotatedRmToken {
+            BBLogger.info(.auth, "KiaUSA: authUser response carried an updated rmToken — rotating cache")
+            configuration.onRememberMeTokenRotated?(rotatedRmToken)
+        }
 
         return AuthToken(
             accessToken: sessionId,
             refreshToken: sessionId,
-            expiresAt: validUntil,
-            pin: pin
+            expiresAt: validUntil
         )
     }
 
-    func parseVehiclesResponse(_ data: Data) throws -> [Vehicle] {
+    package func parseVehiclesResponse(_ data: Data) throws -> [Vehicle] {
         try checkForKiaErrors(data: data)
 
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -93,7 +108,7 @@ extension KiaUSAAPIClient {
                 regId: regId,
                 model: nickname,
                 accountId: accountId,
-                isElectric: fuelType != 3,
+                fuelType: Self.kiaUSAFuelType(from: fuelType),
                 generation: Int(generation) ?? 1,
                 odometer: odometer,
                 vehicleKey: vehicleKey
@@ -101,7 +116,31 @@ extension KiaUSAAPIClient {
         }
     }
 
-    func parseVehicleStatusResponse(_ data: Data, for vehicle: Vehicle) throws -> VehicleStatus {
+    /// Maps Kia USA's `fuelType` integer to our `FuelType` enum.
+    ///
+    /// Kia USA uses a different code scheme than `FuelType.init(number:)`
+    /// (which is calibrated for Hyundai). Confirmed mappings, cross-checked
+    /// against the Python `hyundai_kia_connect_api` reference and live
+    /// vehicle data:
+    ///
+    /// - `4` → EV (confirmed by 2020 Niro EV and 2024 EV9)
+    /// - `7` → PHEV (2018 Niro PHEV, kia_uvo#558)
+    ///
+    /// Everything else defaults to `.gas`: `1` is a Sportage and `3` the
+    /// Niro / Sorento hybrids, and newer PHEVs' codes are unconfirmed. If
+    /// we mis-classify a PHEV here, downstream status fetches that return
+    /// both `evStatus` and `gasRange` will still surface the gas range.
+    /// The 2018 Niro PHEV sends no fuel level at all, so without code 7
+    /// its evStatus-only status would self-heal it into a pure EV.
+    static func kiaUSAFuelType(from fuelType: Int) -> FuelType {
+        switch fuelType {
+        case 4: return .electric
+        case 7: return .phev
+        default: return .gas
+        }
+    }
+
+    package func parseVehicleStatusResponse(_ data: Data, for vehicle: Vehicle) throws -> VehicleStatus {
         try checkForKiaErrors(data: data)
         let lastVehicleInfo = try extractLastVehicleInfo(from: data)
         let vehicleStatus = try extractVehicleStatus(from: lastVehicleInfo)
@@ -151,46 +190,90 @@ extension KiaUSAAPIClient {
         let drvDistance = evStatusData["drvDistance"] as? [[String: Any]] ?? []
         let rangeInfo = drvDistance.first?["rangeByFuel"] as? [String: Any] ?? [:]
         let evModeRange = rangeInfo["evModeRange"] as? [String: Any] ?? [:]
-        let chargeTimes = evStatusData["remainChargeTime"] as? [[String: Any]] ?? []
-        let chargeTime: Int = extractNumber(from: chargeTimes.first?["value"]) ?? 0
-
         let evRange = Distance(
             length: extractNumber(from: evModeRange["value"]) ?? 0,
             units: Distance.Units(extractNumber(from: evModeRange["unit"]) ?? 3)
         )
 
+        let charging = evStatusData["batteryCharge"] as? Bool ?? false
         let batteryPlugin: Int = extractNumber(from: evStatusData["batteryPlugin"]) ?? 0
 
+        // Kia USA reports the live charge rate as `realTimePower` in kW
+        // (e.g. 11.3 on an EV9 on L2). It never sends Hyundai's
+        // `batteryStndChrgPower` / `batteryFstChrgPower`, which this
+        // parser used to read — so every Kia showed no rate (issue #107).
+        // Only trust it mid-charge: the EV9 is V2L-capable and nothing
+        // says the field stays 0 while discharging.
+        let realTimePower: Double = extractNumber(from: evStatusData["realTimePower"]) ?? 0
+        let chargeMinutes = charging ? remainingChargeMinutes(in: evStatusData["remainChargeTime"]) : 0
+
+        // Kia US encodes plugType 0 as DC fast charging and plugType 1
+        // as AC (matches hyundai_kia_connect_api). Earlier code had it
+        // inverted, which made the in-app AC/DC limits show — and set
+        // — swapped vs. Kia Access (issue #41).
         let targetSOC = evStatusData["targetSOC"] as? [[String: Any]] ?? []
         var targetSocAC: Double?, targetSocDC: Double?
         for target in targetSOC {
             if let plugType = target["plugType"] as? Int, let soc = target["targetSOClevel"] as? Double {
-                if plugType == 0 { targetSocAC = soc } else if plugType == 1 { targetSocDC = soc }
+                if plugType == 0 { targetSocDC = soc } else if plugType == 1 { targetSocAC = soc }
             }
         }
 
         return VehicleStatus.EVStatus(
-            charging: evStatusData["batteryCharge"] as? Bool ?? false,
-            chargeSpeed: max(
-                extractNumber(from: evStatusData["batteryStndChrgPower"]) ?? 0,
-                extractNumber(from: evStatusData["batteryFstChrgPower"]) ?? 0
-            ),
+            charging: charging,
+            chargeSpeed: charging ? max(0, realTimePower) : 0,
             evRange: VehicleStatus.FuelRange(range: evRange, percentage: batteryStatus),
             plugType: VehicleStatus.PlugType(fromBatteryPlugin: batteryPlugin),
-            chargeTime: .seconds(60 * chargeTime),
+            chargeTime: .seconds(Int64((60 * chargeMinutes).rounded())),
             targetSocAC: targetSocAC,
             targetSocDC: targetSocDC
         )
     }
 
     private func parseGasRange(from vehicleStatus: [String: Any]) -> VehicleStatus.FuelRange? {
-        guard let distanceToEmptyData = vehicleStatus["distanceToEmpty"] as? [String: Any],
-              let gasRangeValue: Double = extractNumber(from: distanceToEmptyData["value"]),
-              let gasRangeUnit: Int = extractNumber(from: distanceToEmptyData["unit"]),
-              let fuelLevel: Double = extractNumber(from: vehicleStatus["fuelLevel"]) else { return nil }
+        // A JSON boolean is never a fuel level, and `extractNumber`
+        // would coerce one to 0 / 1.
+        guard let fuelLevelRaw = vehicleStatus["fuelLevel"],
+              !Self.isJSONBoolean(fuelLevelRaw),
+              let fuelLevel: Double = extractNumber(from: fuelLevelRaw) else { return nil }
+
+        // The EV9 sends `fuelLevel: 0` (a number) next to a top-level
+        // `distanceToEmpty` that just repeats the EV range. Taken at
+        // face value that's a phantom 0% gas tank, and
+        // `BBVehicle.updateStatus` then promotes the EV to PHEV (issue
+        // #107). Debug exports from older builds rendered the 0 as
+        // `false`, which is why an earlier fix only rejected booleans.
+        // With a high-voltage battery on board, only a positive fuel
+        // level proves there's a tank. The cost: a PHEV run to exactly
+        // 0% reads as tankless and keeps its last gas reading — no Kia
+        // PHEV payload seen so far sends `fuelLevel` at all.
+        let evStatus = vehicleStatus["evStatus"] as? [String: Any]
+        if evStatus != nil && fuelLevel <= 0 { return nil }
+
+        // A plug-in hybrid reports its gas-only range as the evStatus
+        // `gasModeRange`; hyundai_kia_connect_api reads that first and
+        // falls back to `distanceToEmpty`. EVs carry a zero
+        // `gasModeRange` or none, so only a positive one counts.
+        let drvDistance = evStatus?["drvDistance"] as? [[String: Any]]
+        let rangeByFuel = drvDistance?.first?["rangeByFuel"] as? [String: Any]
+        let gasModeRange = rangeByFuel?["gasModeRange"] as? [String: Any]
+        let gasModeValue: Double = extractNumber(from: gasModeRange?["value"]) ?? 0
+        let distanceToEmpty = vehicleStatus["distanceToEmpty"] as? [String: Any]
+        guard let rangeData = gasModeValue > 0 ? gasModeRange : distanceToEmpty,
+              let gasRangeValue: Double = extractNumber(from: rangeData["value"]),
+              let gasRangeUnit: Int = extractNumber(from: rangeData["unit"]) else { return nil }
 
         let gasRangeDistance = Distance(length: gasRangeValue, units: Distance.Units(gasRangeUnit))
         return VehicleStatus.FuelRange(range: gasRangeDistance, percentage: fuelLevel)
+    }
+
+    /// `JSONSerialization` returns `kCFBooleanTrue/False` for JSON
+    /// booleans, which bridge into Swift as `NSNumber` and silently
+    /// coerce to `0` / `1` via `extractNumber`. Distinguish booleans
+    /// from numbers via the underlying CoreFoundation type ID.
+    static func isJSONBoolean(_ value: Any) -> Bool {
+        guard let number = value as? NSNumber else { return false }
+        return CFGetTypeID(number) == CFBooleanGetTypeID()
     }
 
     private func parseLocation(from lastVehicleInfo: [String: Any]) -> VehicleStatus.Location {
@@ -220,6 +303,7 @@ extension KiaUSAAPIClient {
               let utcString = syncDateData["utc"] as? String else { return nil }
 
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMddHHmmss"
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         return formatter.date(from: utcString)

@@ -15,6 +15,14 @@ public final class KiaUSAAPIClient: APIClientBase, APIClientProtocol {
 
     // MARK: - Constants
 
+    /// How long we treat a Kia session ID (`sid`) as valid before forcing
+    /// a re-login. Matches the Python `hyundai_kia_connect_api` reference's
+    /// `LOGIN_TOKEN_LIFETIME = 23h`. The previous BetterBlueKit value of
+    /// 1 hour drove ~23x more `authUser` calls than the reference and
+    /// appears to be the cause of the recurring MFA prompts users were
+    /// hitting on Kia USA accounts.
+    static let loginTokenLifetime: TimeInterval = 23 * 3600
+
     var baseURL: String {
         region.apiBaseURL(for: .kia)
     }
@@ -24,12 +32,19 @@ public final class KiaUSAAPIClient: APIClientBase, APIClientProtocol {
     }
 
     // Device ID is a simple uppercase UUID (matches Python: str(uuid.uuid4()).upper())
-    let deviceId: String = UUID().uuidString.uppercased()
+    // Use persisted device ID from configuration if available, so the server recognizes
+    // the same device across re-authentications and the rmToken remains valid.
+    let deviceId: String
 
     // Client UUID is a UUID5 hash of device_id using DNS namespace
     var clientUUID: String {
         let namespaceUUID = UUID(uuidString: "6ba7b810-9dad-11d1-80b4-00c04fd430c8")!
         return generateUUID5(namespace: namespaceUUID, name: deviceId).uuidString.lowercased()
+    }
+
+    public override init(configuration: APIClientConfiguration, urlSession: URLSession = .shared) {
+        self.deviceId = configuration.deviceId ?? UUID().uuidString.uppercased()
+        super.init(configuration: configuration, urlSession: urlSession)
     }
 
     public override var apiName: String { "KiaUSA" }
@@ -83,8 +98,8 @@ public final class KiaUSAAPIClient: APIClientBase, APIClientProtocol {
 
     // MARK: - APIClientProtocol Implementation
 
-    public func supportsMFA() -> Bool {
-        true
+    public func optionalFeaturesSupported() -> [OptionalAPIFeature] {
+        [.mfa, .surroundView, .surroundViewCapture]
     }
 
     public func login() async throws -> AuthToken {
@@ -191,10 +206,47 @@ public final class KiaUSAAPIClient: APIClientBase, APIClientProtocol {
         return try parseVehiclesResponse(data)
     }
 
-    public func fetchVehicleStatus(for vehicle: Vehicle, authToken: AuthToken) async throws -> VehicleStatus {
+    public func fetchVehicleStatus(
+        for vehicle: Vehicle,
+        authToken: AuthToken,
+        cached: Bool
+    ) async throws -> VehicleStatus {
         let vehicleKeyLog = vehicle.vehicleKey ?? "nil"
-        BBLogger.debug(.api, "KiaUSA: Fetching status for VIN: \(vehicle.vin), vehicleKey: \(vehicleKeyLog)")
+        BBLogger.debug(
+            .api,
+            "KiaUSA: Fetching status for VIN: \(vehicle.vin), vehicleKey: \(vehicleKeyLog), cached: \(cached)"
+        )
 
+        // When the caller asks for a real-time reading, hit `rems/rvs` first
+        // to make Kia's backend poll the vehicle modem (same endpoint the
+        // Kia Access app's pull-to-refresh uses). It's an async server call
+        // that blocks until the vehicle responds (20–60 s typical). After
+        // it returns we fall through to `cmm/gvi`, which now returns the
+        // freshly-refreshed cached snapshot. If the real-time call fails
+        // we log and continue — a stale snapshot beats surfacing an error.
+        //
+        // Cooldown: post-command status polling calls this every ~10–15 s,
+        // and back-to-back rvs requests get throttled by Kia (returning
+        // errors we'd swallow, i.e. stale snapshots anyway) while each call
+        // can block for up to a minute. One successful modem poll per
+        // window is enough — within it, `cmm/gvi` already returns the
+        // freshly-refreshed snapshot.
+        if !cached {
+            let now = Date()
+            if let last = lastRealTimeRefresh, now.timeIntervalSince(last) < Self.realTimeRefreshCooldown {
+                BBLogger.debug(
+                    .api,
+                    "KiaUSA: skipping rems/rvs (last real-time refresh \(Int(now.timeIntervalSince(last)))s ago)"
+                )
+            } else if try await triggerRealTimeStatusRefresh(for: vehicle, authToken: authToken) {
+                // Stamp only successful modem polls — a failed/throttled one
+                // should be retried on the next poll, not cooled down.
+                lastRealTimeRefresh = Date()
+            }
+        }
+
+        // `cmm/gvi` only accepts `vehicleStatus: "1"`. Sending anything else
+        // returns the server-side 9001 "Incorrect request payload format".
         let body: [String: Any] = [
             "vehicleConfigReq": [
                 "airTempRange": "0",
@@ -220,28 +272,56 @@ public final class KiaUSAAPIClient: APIClientBase, APIClientProtocol {
             method: .POST,
             headers: authorizedHeaders(authToken: authToken, vehicleKey: vehicle.vehicleKey),
             body: body,
-            requestType: .fetchVehicleStatus
+            requestType: .fetchVehicleStatus,
+            vin: vehicle.vin
         )
 
         return try parseVehicleStatusResponse(data, for: vehicle)
     }
 
+    /// When the last SUCCESSFUL `rems/rvs` modem poll completed.
+    private var lastRealTimeRefresh: Date?
+
+    /// Surround-view captures already assembled this session, keyed by
+    /// `svmId`.
+    ///
+    /// Lives here rather than in the `+SurroundView` extension only
+    /// because Swift extensions cannot hold stored properties. See
+    /// `fetchSurroundViewCaptures` for why it exists: a capture is
+    /// immutable once the vehicle has uploaded it, and its imagery is
+    /// ~280 KB of base64 behind its own request.
+    var surroundViewCache: [String: SurroundViewCapture] = [:]
+
+    /// The last `lbs/svm/inquire` listing, keyed by `svmId`.
+    ///
+    /// Kept so a capture loaded on demand can still be merged onto the
+    /// metadata the index reported, exactly as an eager fetch does.
+    /// Metadata only — no imagery — so it costs a few small dictionaries.
+    var surroundViewIndex: [String: [String: Any]] = [:]
+
     public func sendCommand(for vehicle: Vehicle, command: VehicleCommand, authToken: AuthToken) async throws {
+        switch command {
+        case .flashLights, .honkAndFlash:
+            throw APIError(message: "Horn/lights command not supported for Kia USA", apiName: apiName)
+        default: break
+        }
         let url = commandURL(for: command)
         let body = commandBody(for: command, vehicle: vehicle)
+        let method = commandMethod(for: command)
 
         let (data, _, _) = try await performJSONRequest(
             url: url,
-            method: .POST,
+            method: method,
             headers: authorizedHeaders(authToken: authToken, vehicleKey: vehicle.vehicleKey),
-            body: body,
-            requestType: .sendCommand
+            body: method == .GET ? nil : body,
+            requestType: .sendCommand,
+            vin: vehicle.vin
         )
 
         try checkForKiaErrors(data: data)
     }
 
-    public func fetchEVTripDetails(for vehicle: Vehicle, authToken: AuthToken) async throws -> [EVTripDetail]? {
+    public func fetchEVTripSummary(for vehicle: Vehicle, authToken: AuthToken) async throws -> [EVTripSummary]? {
         // Kia USA doesn't support EV trip details
         nil
     }
@@ -270,5 +350,49 @@ public final class KiaUSAAPIClient: APIClientBase, APIClientProtocol {
             hash[8], hash[9], hash[10], hash[11],
             hash[12], hash[13], hash[14], hash[15]
         ))
+    }
+}
+
+// MARK: - Real-time status refresh
+
+extension KiaUSAAPIClient {
+    /// Cooldown between successful `rems/rvs` modem polls (see the callsite
+    /// comment in `fetchVehicleStatus`).
+    static let realTimeRefreshCooldown: TimeInterval = 60
+
+    /// Asks Kia's backend to poll the vehicle's telematics modem for fresh
+    /// data. The response comes back once the modem replies — usually within
+    /// ~30 seconds. Returns whether the poll succeeded; errors are logged but
+    /// swallowed so the caller still gets a (possibly stale) snapshot from
+    /// the follow-up `cmm/gvi` call.
+    @discardableResult
+    func triggerRealTimeStatusRefresh(
+        for vehicle: Vehicle,
+        authToken: AuthToken
+    ) async throws -> Bool {
+        BBLogger.info(.api, "KiaUSA: Requesting real-time status refresh for VIN \(vehicle.vin)")
+
+        do {
+            let (data, _, _) = try await performJSONRequest(
+                url: "\(apiURL)rems/rvs",
+                method: .POST,
+                headers: authorizedHeaders(authToken: authToken, vehicleKey: vehicle.vehicleKey),
+                body: ["requestType": 0],
+                requestType: .fetchVehicleStatus,
+                vin: vehicle.vin
+            )
+            try checkForKiaErrors(data: data)
+            return true
+        } catch let error as APIError where error.errorType == .invalidCredentials {
+            // Bubble auth failures up — the caller (BBAccount) knows how to
+            // re-authenticate. Swallowing would mask a session that really
+            // needs refreshing.
+            throw error
+        } catch {
+            // Swallow everything else: the user-visible UX is "refresh took
+            // a while and maybe the data is 30 s stale", not a failure.
+            BBLogger.warning(.api, "KiaUSA: rems/rvs real-time refresh failed, falling back to cached: \(error)")
+            return false
+        }
     }
 }

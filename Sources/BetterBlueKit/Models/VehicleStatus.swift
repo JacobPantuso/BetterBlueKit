@@ -25,16 +25,29 @@ public struct VehicleStatus: Codable, Hashable, Sendable {
     public enum PlugType: Int, Codable, Hashable, Sendable {
         case unplugged = 0
         case acCharger = 2
-        case dcCharger = 1 // DC is any value other than 0 or 2
+        case dcCharger = 1
 
+        /// Maps Hyundai/Kia's `batteryPlugin` int code to a typed plug.
+        /// Documented values (per hyundai_kia_connect_api):
+        ///   0 = unplugged
+        ///   1 = DC fast charger (CCS / CHAdeMO)
+        ///   2 = AC portable charger
+        ///   3 = AC station charger (J1772 / Type 2)
+        /// Some vehicles also report 4 — observed in the wild on
+        /// IONIQ 5s plugged into J1772 AC chargers, so it's AC.
+        ///
+        /// The DC code is specifically 1; ANY other non-zero value is
+        /// AC. Previously the default fell through to `.dcCharger`,
+        /// which caused J1772-plugged cars reporting `batteryPlugin: 4`
+        /// to display the CCS DC icon.
         public init(fromBatteryPlugin value: Int) {
             switch value {
             case 0:
                 self = .unplugged
-            case 2:
-                self = .acCharger
-            default:
+            case 1:
                 self = .dcCharger
+            default:
+                self = .acCharger
             }
         }
     }
@@ -85,6 +98,11 @@ public struct VehicleStatus: Codable, Hashable, Sendable {
         }
 
         public var debug: String { "\(latitude)°, \(longitude)°" }
+
+        /// True when the location carries real coordinates. The APIs use
+        /// (0, 0) — null island — as their "no fix" sentinel, so treat that
+        /// as absent.
+        public var hasCoordinates: Bool { latitude != 0 || longitude != 0 }
     }
 
     public var location: Location
@@ -116,6 +134,15 @@ public struct VehicleStatus: Codable, Hashable, Sendable {
     public var trunkOpen: Bool?
     public var hoodOpen: Bool?
     public var tirePressureWarning: TirePressureWarning?
+
+    // additional flags reported by some regions (e.g. Canada)
+    public var engineOn: Bool?
+    public var accessoryOn: Bool?
+    public var remoteIgnition: Bool?
+    public var transmissionCondition: Bool?
+    public var sleepMode: Bool?
+    public var washerFluidLow: Bool?
+    public var smartKeyBatteryWarning: Bool?
 
     public struct DoorStatus: Codable, Hashable, Sendable {
         public var frontLeft: Bool
@@ -174,11 +201,18 @@ public struct VehicleStatus: Codable, Hashable, Sendable {
                 odometer: Distance? = nil, syncDate: Date? = nil,
                 battery12V: Int? = nil, doorOpen: DoorStatus? = nil,
                 trunkOpen: Bool? = nil, hoodOpen: Bool? = nil,
-                tirePressureWarning: TirePressureWarning? = nil) {
+                tirePressureWarning: TirePressureWarning? = nil,
+                engineOn: Bool? = nil, accessoryOn: Bool? = nil,
+                remoteIgnition: Bool? = nil, transmissionCondition: Bool? = nil,
+                sleepMode: Bool? = nil, washerFluidLow: Bool? = nil, smartKeyBatteryWarning: Bool? = nil) {
         (self.vin, self.gasRange, self.evStatus, self.location) = (vin, gasRange, evStatus, location)
         (self.lockStatus, self.climateStatus, self.odometer, self.syncDate) =
             (lockStatus, climateStatus, odometer, syncDate)
-        (self.battery12V, self.doorOpen, self.trunkOpen, self.hoodOpen, self.tirePressureWarning) =
-            (battery12V, doorOpen, trunkOpen, hoodOpen, tirePressureWarning)
+        (self.battery12V, self.doorOpen, self.trunkOpen, self.hoodOpen, self.tirePressureWarning,
+         self.engineOn, self.accessoryOn, self.remoteIgnition, self.transmissionCondition,
+         self.sleepMode, self.washerFluidLow, self.smartKeyBatteryWarning) =
+            (battery12V, doorOpen, trunkOpen, hoodOpen, tirePressureWarning,
+             engineOn, accessoryOn, remoteIgnition, transmissionCondition, sleepMode, washerFluidLow,
+             smartKeyBatteryWarning)
     }
 }

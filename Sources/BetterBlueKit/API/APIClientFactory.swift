@@ -7,20 +7,6 @@
 
 import Foundation
 
-// MARK: - Unsupported Region Error
-
-public enum RegionSupportError: Error, LocalizedError {
-    case unsupportedRegion(brand: Brand, region: Region)
-
-    public var errorDescription: String? {
-        switch self {
-        case .unsupportedRegion(let brand, let region):
-            return "\(brand.displayName) is not yet supported in \(region.rawValue). " +
-                   "This region is coming soon."
-        }
-    }
-}
-
 // MARK: - API Client Factory
 
 /// Creates the appropriate API client for a given brand and region.
@@ -38,7 +24,9 @@ public func createBetterBlueKitAPIClient(
     case .kia:
         return try createKiaClient(configuration: configuration)
     case .fake:
-        throw RegionSupportError.unsupportedRegion(brand: .fake, region: configuration.region)
+        throw APIError.regionNotSupported(
+            "Fake brand is not supported by BetterBlueKit API client factory"
+        )
     }
 }
 
@@ -49,10 +37,14 @@ private func createHyundaiClient(configuration: APIClientConfiguration) throws -
     switch configuration.region {
     case .usa:
         return HyundaiUSAAPIClient(configuration: configuration)
+    case .canada:
+        return HyundaiCanadaAPIClient(configuration: configuration)
     case .europe:
         return HyundaiEuropeAPIClient(configuration: configuration)
-    case .canada, .australia, .china, .india:
-        throw RegionSupportError.unsupportedRegion(brand: .hyundai, region: configuration.region)
+    case .australia, .china, .india:
+        throw APIError.regionNotSupported(
+            "\(Brand.hyundai.displayName) is not yet supported in \(configuration.region.rawValue)"
+        )
     }
 }
 
@@ -63,34 +55,59 @@ private func createKiaClient(configuration: APIClientConfiguration) throws -> an
     switch configuration.region {
     case .usa:
         return KiaUSAAPIClient(configuration: configuration)
-    case .canada, .europe, .australia, .china, .india:
-        throw RegionSupportError.unsupportedRegion(brand: .kia, region: configuration.region)
+    case .canada:
+        // Same service as Hyundai Canada, at kiaconnect.ca.
+        return HyundaiCanadaAPIClient(configuration: configuration)
+    case .europe:
+        return KiaEuropeAPIClient(configuration: configuration)
+    case .australia, .china, .india:
+        throw APIError.regionNotSupported(
+            "\(Brand.kia.displayName) is not yet supported in \(configuration.region.rawValue)"
+        )
     }
 }
 
 // MARK: - Region Support Queries
 
-/// Returns whether a brand/region combination is currently supported.
-public func isRegionSupported(brand: Brand, region: Region) -> Bool {
-    switch brand {
-    case .hyundai, .kia:
-        switch region {
-        case .usa, .europe:
-            return true
-        case .canada, .australia, .china, .india:
-            return false
-        }
-    case .fake:
-        return false
-    }
-}
-
 /// Returns the list of supported regions for a given brand.
 public func supportedRegions(for brand: Brand) -> [Region] {
     switch brand {
-    case .hyundai, .kia:
-        return [.usa, .europe]  // Only fully implemented regions
+    case .hyundai:
+        return [.usa, .canada, .europe]
+    case .kia:
+        return [.usa, .canada, .europe]
     case .fake:
-        return []
+        return Region.allCases
+    }
+}
+
+public func betaRegions(for brand: Brand) -> [Region] {
+    switch brand {
+    case .hyundai:
+        return [.canada, .europe]
+    case .kia:
+        return [.europe]
+    default: return []
+    }
+}
+
+/// Whether a given brand/region pair requires the user to supply a
+/// Bluelink / Kia Connect service PIN at account-setup time. UIs
+/// can call this to show/hide the PIN field on the add-account form.
+///
+/// Today the gating is hardcoded:
+///   - Hyundai USA / Canada / EU
+///   - Kia EU
+///
+/// Kia USA and Fake authenticate without a PIN.
+public func requiresPin(brand: Brand, region: Region) -> Bool {
+    switch (brand, region) {
+    case (.hyundai, .usa),
+         (.hyundai, .canada),
+         (.hyundai, .europe),
+         (.kia, .europe):
+        return true
+    default:
+        return false
     }
 }

@@ -13,7 +13,7 @@ import Foundation
 /// Subclasses implement `APIClientProtocol` methods directly for their specific region/brand.
 @MainActor
 open class APIClientBase {
-    public let configuration: APIClientConfiguration
+    public var configuration: APIClientConfiguration
     public let urlSession: URLSession
 
     // Convenience accessors
@@ -30,6 +30,15 @@ open class APIClientBase {
         self.urlSession = urlSession
     }
 
+    // MARK: - default so set deviceId in configuration
+    public func registerDevice() async throws -> String? {
+        // Generate a stable device ID for Kia accounts so the rmToken stays valid
+        // across API client re-initializations
+        let deviceId = UUID().uuidString.uppercased()
+        configuration = configuration.with(deviceId: deviceId)
+        return deviceId
+    }
+
     // MARK: - HTTP Request Execution
 
     /// Performs an HTTP request with logging and error handling
@@ -38,7 +47,8 @@ open class APIClientBase {
         method: HTTPMethod = .GET,
         headers: [String: String] = [:],
         body: Data? = nil,
-        requestType: HTTPRequestType
+        requestType: HTTPRequestType,
+        vin: String? = nil
     ) async throws -> (Data, HTTPURLResponse) {
         guard let requestUrl = URL(string: url) else {
             throw APIError(message: "Invalid URL: \(url)", apiName: apiName)
@@ -56,7 +66,7 @@ open class APIClientBase {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
 
-        return try await performLoggedRequest(request, requestType: requestType)
+        return try await performLoggedRequest(request, requestType: requestType, vin: vin)
     }
 
     /// Performs an HTTP request and returns parsed JSON
@@ -65,7 +75,8 @@ open class APIClientBase {
         method: HTTPMethod = .GET,
         headers: [String: String] = [:],
         body: [String: Any]? = nil,
-        requestType: HTTPRequestType
+        requestType: HTTPRequestType,
+        vin: String? = nil
     ) async throws -> (Data, [String: Any], HTTPURLResponse) { // swiftlint:disable:this large_tuple
         let bodyData = body.flatMap { try? JSONSerialization.data(withJSONObject: $0) }
 
@@ -74,7 +85,8 @@ open class APIClientBase {
             method: method,
             headers: headers,
             body: bodyData,
-            requestType: requestType
+            requestType: requestType,
+            vin: vin
         )
 
         let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
@@ -83,9 +95,14 @@ open class APIClientBase {
 
     // MARK: - Internal Request Handling
 
+    /// `session` overrides the client's URLSession for this one request —
+    /// the EU CCI signin uses a redirect-blocking session so the 302's
+    /// Location (which carries the auth code) can be read instead of chased.
     func performLoggedRequest(
         _ request: URLRequest,
-        requestType: HTTPRequestType
+        requestType: HTTPRequestType,
+        vin: String? = nil,
+        session: URLSession? = nil
     ) async throws -> (Data, HTTPURLResponse) {
         let startTime = Date()
         let requestHeaders = request.allHTTPHeaderFields ?? [:]
@@ -102,11 +119,12 @@ open class APIClientBase {
             request: request,
             requestHeaders: requestHeaders,
             requestBody: requestBody,
-            startTime: startTime
+            startTime: startTime,
+            vin: vin
         )
 
         do {
-            let (data, response) = try await urlSession.data(for: request)
+            let (data, response) = try await (session ?? urlSession).data(for: request)
             return try handleSuccessfulRequest(data: data, response: response, context: context)
         } catch let error as APIError {
             throw error
@@ -141,44 +159,13 @@ open class APIClientBase {
             responseBody: responseBody,
             error: nil,
             apiError: apiError,
-            startTime: context.startTime
+            startTime: context.startTime,
+            vin: context.vin
         ))
 
         try validateHTTPResponse(httpResponse, data: data, responseBody: responseBody)
 
         return (data, httpResponse)
-    }
-
-    // MARK: - Error Handling
-
-    func validateHTTPResponse(_ httpResponse: HTTPURLResponse, data: Data, responseBody: String?) throws {
-        if httpResponse.statusCode == 401 {
-            throw APIError.invalidCredentials(
-                "Authentication expired: \(responseBody ?? "Unknown error")",
-                apiName: apiName
-            )
-        }
-
-        if httpResponse.statusCode == 502 {
-            throw APIError.serverError(
-                "Server error (502): \(responseBody ?? "Unknown error")",
-                apiName: apiName
-            )
-        }
-
-        if httpResponse.statusCode >= 400 {
-            let statusText = HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
-            throw APIError(
-                message: "HTTP \(httpResponse.statusCode): \(statusText)",
-                code: httpResponse.statusCode,
-                apiName: apiName
-            )
-        }
-    }
-
-    func handleNetworkError(_ error: Error, context: RequestContext) -> APIError {
-        logHTTPRequest(createErrorLogData(context: context, error: error.localizedDescription))
-        return APIError(message: "Network error: \(error.localizedDescription)", apiName: apiName)
     }
 
     // MARK: - Logging Helpers
@@ -189,6 +176,7 @@ open class APIClientBase {
         let requestHeaders: [String: String]
         let requestBody: String?
         let startTime: Date
+        let vin: String?
     }
 
     struct HTTPRequestLogData {
@@ -202,18 +190,45 @@ open class APIClientBase {
         let error: String?
         let apiError: String?
         let startTime: Date
+        let vin: String?
     }
 
     func logHTTPRequest(_ logData: HTTPRequestLogData) {
         let duration = Date().timeIntervalSince(logData.startTime)
         let method = logData.request.httpMethod ?? "GET"
-        let url = logData.request.url?.absoluteString ?? "Unknown URL"
+        let rawURL = logData.request.url?.absoluteString ?? "Unknown URL"
+        // Request URLs can carry credentials too (e.g. the EU CCI token
+        // exchange's `?code=…`), so they go through the same redaction as
+        // bodies.
+        let url = configuration.redactPII
+            ? (SensitiveDataRedactor.redact(rawURL) ?? rawURL)
+            : rawURL
         let stackTrace = captureStackTrace()
 
-        let safeRequestHeaders = redactSensitiveHeaders(logData.requestHeaders)
-        let safeRequestBody = redactSensitiveData(in: logData.requestBody)
-        let safeResponseHeaders = redactSensitiveHeaders(logData.responseHeaders)
-        let safeResponseBody = redactSensitiveData(in: logData.responseBody)
+        // Apply redaction unless disabled
+        let requestHeaders: [String: String]
+        let requestBody: String?
+        let responseHeaders: [String: String]
+        let responseBody: String?
+
+        // Oversized values go first, and regardless of the redaction
+        // setting: a surround-view response is megabytes of base64 JPEG,
+        // which would bloat the persisted log (and every debug export)
+        // and drag the redaction regexes across the whole payload.
+        let sizedRequestBody = SensitiveDataRedactor.elideOversizedValues(logData.requestBody)
+        let sizedResponseBody = SensitiveDataRedactor.elideOversizedValues(logData.responseBody)
+
+        if configuration.redactPII {
+            requestHeaders = redactSensitiveHeaders(logData.requestHeaders)
+            requestBody = redactSensitiveData(in: sizedRequestBody)
+            responseHeaders = redactSensitiveHeaders(logData.responseHeaders)
+            responseBody = redactSensitiveData(in: sizedResponseBody)
+        } else {
+            requestHeaders = logData.requestHeaders
+            requestBody = sizedRequestBody
+            responseHeaders = logData.responseHeaders
+            responseBody = sizedResponseBody
+        }
 
         let httpLog = HTTPLog(
             timestamp: logData.startTime,
@@ -221,21 +236,22 @@ open class APIClientBase {
             requestType: logData.requestType,
             method: method,
             url: url,
-            requestHeaders: safeRequestHeaders,
-            requestBody: safeRequestBody,
+            requestHeaders: requestHeaders,
+            requestBody: requestBody,
             responseStatus: logData.responseStatus,
-            responseHeaders: safeResponseHeaders,
-            responseBody: safeResponseBody,
+            responseHeaders: responseHeaders,
+            responseBody: responseBody,
             error: logData.error,
             apiError: logData.apiError,
             duration: duration,
-            stackTrace: stackTrace
+            stackTrace: stackTrace,
+            vin: logData.vin
         )
 
         logSink?(httpLog)
     }
 
-    private func createErrorLogData(context: RequestContext, error: String) -> HTTPRequestLogData {
+    func createErrorLogData(context: RequestContext, error: String) -> HTTPRequestLogData {
         HTTPRequestLogData(
             requestType: context.requestType,
             request: context.request,
@@ -246,7 +262,8 @@ open class APIClientBase {
             responseBody: nil,
             error: error,
             apiError: nil,
-            startTime: context.startTime
+            startTime: context.startTime,
+            vin: context.vin
         )
     }
 
@@ -280,6 +297,19 @@ open class APIClientBase {
             return "API Error: \(error)"
         }
 
+        // Bluelink Canada format: {"error": {"errorCode": "6533", "errorDesc": "..."}, "responseHeader": {"responseCode": 1}}
+        if let responseHeader = json["responseHeader"] as? [String: Any],
+           let responseCode: Int = extractNumber(from: responseHeader["responseCode"]),
+           responseCode != 0,
+           let errorDict = json["error"] as? [String: Any] {
+            let errorCode = errorDict["errorCode"] as? String ?? "unknown"
+            let errorDesc = errorDict["errorDesc"] as? String ?? "Unknown error"
+            if errorCode == "6533" || errorDesc.lowercased().contains("processing an earlier inquiry") {
+                return "Vehicle Busy (\(errorCode)): \(errorDesc)"
+            }
+            return "API Error \(errorCode): \(errorDesc)"
+        }
+
         return nil
     }
 
@@ -288,35 +318,15 @@ open class APIClientBase {
     open var apiName: String { "APIClient" }
 }
 
-// MARK: - Redaction Helpers (moved from extension)
+// MARK: - Redaction Helpers
 
 extension APIClientBase {
     func redactSensitiveHeaders(_ headers: [String: String]) -> [String: String] {
-        let sensitiveKeys = ["authorization", "accesstoken", "access_token", "cookie",
-                            "bluelinkservicepin", "password", "pin", "clientsecret"]
-        return headers.reduce(into: [:]) { result, pair in
-            let key = pair.key.lowercased()
-            result[pair.key] = sensitiveKeys.contains(key) ? "[REDACTED]" : pair.value
-        }
+        SensitiveDataRedactor.redactHeaders(headers)
     }
 
     func redactSensitiveData(in body: String?) -> String? {
-        guard let body else { return nil }
-        var redacted = body
-        let patterns = [
-            (#""password"\s*:\s*"[^"]*""#, #""password":"[REDACTED]""#),
-            (#""pin"\s*:\s*"[^"]*""#, #""pin":"[REDACTED]""#),
-            (#""access_token"\s*:\s*"[^"]*""#, #""access_token":"[REDACTED]""#),
-            (#""refresh_token"\s*:\s*"[^"]*""#, #""refresh_token":"[REDACTED]""#)
-        ]
-        for (pattern, replacement) in patterns {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
-                redacted = regex.stringByReplacingMatches(
-                    in: redacted, range: NSRange(redacted.startIndex..., in: redacted), withTemplate: replacement
-                )
-            }
-        }
-        return redacted
+        SensitiveDataRedactor.redact(body)
     }
 
     func captureStackTrace() -> String {

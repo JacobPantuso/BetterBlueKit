@@ -225,6 +225,137 @@ struct RegionSpecificTests {
         }
     }
 
+    // MARK: - Canada parsing extras
+
+    @MainActor @Test("Canada status parsing includes engine/acc/remote flags")
+    func testCanadaStatusParsingExtraFlags() throws {
+        let status: [String: Any] = [
+            "engine": true,
+            "acc": false,
+            "remoteIgnition": true,
+            "transCond": false,
+            "sleepModeCheck": true,
+            "doorLock": true,
+            "doorOpen": ["frontLeft": 0, "frontRight": 0, "backLeft": 0, "backRight": 0],
+            "trunkOpen": false,
+            "hoodOpen": true,
+            "tirePressureLamp": ["all": 0, "frontLeft": 1, "frontRight": 0, "rearLeft": 0, "rearRight": 0],
+            "battery": ["batSoc": 75],
+            "airTemp": ["value": "22", "unit": 0],
+            "defrost": false,
+            "airCtrlOn": false,
+            "steerWheelHeat": 1,
+            "lastStatusDate": "20260221195224",
+            "washerFluidStatus": true
+        ]
+        let json: [String: Any] = [
+            "responseHeader": ["responseCode": 0],
+            "result": ["status": status]
+        ]
+
+        let data = try JSONSerialization.data(withJSONObject: json)
+        let config = APIClientConfiguration(
+            region: .canada,
+            brand: .hyundai,
+            username: "",
+            password: "",
+            pin: "",
+            accountId: UUID()
+        )
+        let client = HyundaiCanadaAPIClient(configuration: config)
+        let vehicle = Vehicle(
+            vin: "TESTVIN",
+            regId: "REG",
+            model: "MODEL",
+            accountId: UUID(),
+            fuelType: .gas,
+            generation: 1,
+            odometer: Distance(length: 0, units: .kilometers)
+        )
+
+        let statusResult = try client.parseCanadaVehicleStatusResponse(data, for: vehicle)
+        #expect(statusResult.engineOn == true)
+        #expect(statusResult.accessoryOn == false)
+        #expect(statusResult.remoteIgnition == true)
+        #expect(statusResult.transmissionCondition == false)
+        #expect(statusResult.sleepMode == true)
+        #expect(statusResult.washerFluidLow == true)
+    }
+
+    @MainActor @Test("Canada location response parsing reads fndmcr coordinates")
+    func testCanadaLocationResponseParsing() throws {
+        let json: [String: Any] = [
+            "responseHeader": ["responseCode": 0],
+            "result": [
+                "coord": [
+                    "lat": 43.6532,
+                    "lon": -79.3832
+                ]
+            ]
+        ]
+
+        let data = try JSONSerialization.data(withJSONObject: json)
+        let config = APIClientConfiguration(
+            region: .canada,
+            brand: .hyundai,
+            username: "",
+            password: "",
+            pin: "",
+            accountId: UUID()
+        )
+        let client = HyundaiCanadaAPIClient(configuration: config)
+
+        let location = try client.parseCanadaLocationResponse(data)
+        #expect(location.latitude == 43.6532)
+        #expect(location.longitude == -79.3832)
+    }
+
+    @MainActor @Test("Canada status parsing uses injected vehicle location coordinates")
+    func testCanadaStatusParsingInjectedLocation() throws {
+        let status: [String: Any] = [
+            "doorLock": true,
+            "airTemp": ["value": "22", "unit": 0],
+            "defrost": false,
+            "airCtrlOn": false,
+            "steerWheelHeat": 0,
+            "lastStatusDate": "20260221195224",
+            "vehicleLocation": [
+                "coord": [
+                    "lat": 43.6532,
+                    "lon": -79.3832
+                ]
+            ]
+        ]
+        let json: [String: Any] = [
+            "responseHeader": ["responseCode": 0],
+            "result": ["status": status]
+        ]
+
+        let data = try JSONSerialization.data(withJSONObject: json)
+        let config = APIClientConfiguration(
+            region: .canada,
+            brand: .hyundai,
+            username: "",
+            password: "",
+            pin: "",
+            accountId: UUID()
+        )
+        let client = HyundaiCanadaAPIClient(configuration: config)
+        let vehicle = Vehicle(
+            vin: "TESTVIN",
+            regId: "REG",
+            model: "MODEL",
+            accountId: UUID(),
+            fuelType: .gas,
+            generation: 1,
+            odometer: Distance(length: 0, units: .kilometers)
+        )
+
+        let statusResult = try client.parseCanadaVehicleStatusResponse(data, for: vehicle)
+        #expect(statusResult.location.latitude == 43.6532)
+        #expect(statusResult.location.longitude == -79.3832)
+    }
+
     // MARK: - API Client Creation Tests
 
     @Test("API client creation for supported regions")
@@ -264,16 +395,43 @@ struct RegionSpecificTests {
         )
         let hyundaiEuropeClient = try createBetterBlueKitAPIClient(configuration: hyundaiEuropeConfig)
         #expect(hyundaiEuropeClient is HyundaiEuropeAPIClient)
+
+        // Hyundai Canada should create successfully
+        let hyundaiCanadaConfig = APIClientConfiguration(
+            region: .canada,
+            brand: .hyundai,
+            username: "test@example.com",
+            password: "password123",
+            pin: "0000",
+            accountId: UUID()
+        )
+        let hyundaiCanadaClient = try createBetterBlueKitAPIClient(configuration: hyundaiCanadaConfig)
+        #expect(hyundaiCanadaClient is HyundaiCanadaAPIClient)
+    }
+
+    @Test("requiresPin matrix")
+    func testRequiresPin() {
+        // PIN-required combinations
+        #expect(requiresPin(brand: .hyundai, region: .usa))
+        #expect(requiresPin(brand: .hyundai, region: .canada))
+        #expect(requiresPin(brand: .hyundai, region: .europe))
+        #expect(requiresPin(brand: .kia, region: .europe))
+
+        // PIN-not-required combinations
+        #expect(!requiresPin(brand: .kia, region: .usa))
+        #expect(!requiresPin(brand: .fake, region: .usa))
+
+        // Unsupported combinations still answer (false) — the
+        // helper is a UI gate, not a regional-support check.
+        #expect(!requiresPin(brand: .kia, region: .canada))
+        #expect(!requiresPin(brand: .kia, region: .australia))
     }
 
     @Test("API client creation for unsupported regions throws")
     @MainActor func testAPIClientCreationForUnsupportedRegions() {
         let unsupportedConfigs: [(Region, Brand)] = [
-            (.canada, .hyundai),
-            (.canada, .kia),
             (.australia, .hyundai),
-            (.australia, .kia),
-            (.europe, .kia)  // Kia Europe not yet implemented
+            (.australia, .kia)
         ]
 
         for (region, brand) in unsupportedConfigs {
@@ -286,8 +444,13 @@ struct RegionSpecificTests {
                 accountId: UUID()
             )
 
-            #expect(throws: RegionSupportError.self) {
+            do {
                 _ = try createBetterBlueKitAPIClient(configuration: config)
+                Issue.record("Expected APIError for \(brand) in \(region)")
+            } catch let error as APIError {
+                #expect(error.errorType == .regionNotSupported)
+            } catch {
+                Issue.record("Unexpected error type: \(error)")
             }
         }
     }

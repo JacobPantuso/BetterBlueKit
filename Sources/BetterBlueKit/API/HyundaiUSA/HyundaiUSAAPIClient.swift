@@ -43,7 +43,7 @@ public final class HyundaiUSAAPIClient: APIClientBase, APIClientProtocol {
         ]
     }
 
-    func authorizedHeaders(authToken: AuthToken, vehicle: Vehicle? = nil) -> [String: String] {
+    func authorizedHeaders(authToken: AuthToken, vehicle: Vehicle? = nil, refresh: Bool = false) -> [String: String] {
         var result = headers()
         result["accessToken"] = authToken.accessToken
         result["language"] = "0"
@@ -56,7 +56,10 @@ public final class HyundaiUSAAPIClient: APIClientBase, APIClientProtocol {
         result["referer"] = "https://\(apiHost)/login"
         result["username"] = username
         result["blueLinkServicePin"] = pin
-        result["refresh"] = "false"
+        // "refresh: true" forces the backend to poll the vehicle's modem for
+        // current state instead of returning the last cached snapshot. This
+        // is what MyHyundai uses for pull-to-refresh.
+        result["refresh"] = refresh ? "true" : "false"
 
         if let vehicle {
             result["gen"] = String(vehicle.generation)
@@ -66,6 +69,7 @@ public final class HyundaiUSAAPIClient: APIClientBase, APIClientProtocol {
         }
 
         let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
         dateFormatter.dateFormat = "yyyyMMddHHmmss"
         result["payloadGenerated"] = dateFormatter.string(from: Date())
         result["includeNonConnectedVehicles"] = "Y"
@@ -100,20 +104,42 @@ public final class HyundaiUSAAPIClient: APIClientBase, APIClientProtocol {
         return try parseVehiclesResponse(data)
     }
 
-    public func fetchVehicleStatus(for vehicle: Vehicle, authToken: AuthToken) async throws -> VehicleStatus {
-        let statusHeaders = authorizedHeaders(authToken: authToken, vehicle: vehicle)
+    public func fetchVehicleStatus(
+        for vehicle: Vehicle,
+        authToken: AuthToken,
+        cached: Bool
+    ) async throws -> VehicleStatus {
+        let statusHeaders = authorizedHeaders(authToken: authToken, vehicle: vehicle, refresh: !cached)
 
-        let (data, _, _) = try await performJSONRequest(
-            url: "\(baseURL)/ac/v2/rcs/rvs/vehicleStatus",
-            method: .GET,
-            headers: statusHeaders,
-            requestType: .fetchVehicleStatus
-        )
+        do {
+            let (data, _, _) = try await performJSONRequest(
+                url: "\(baseURL)/ac/v2/rcs/rvs/vehicleStatus",
+                method: .GET,
+                headers: statusHeaders,
+                requestType: .fetchVehicleStatus,
+                vin: vehicle.vin
+            )
 
-        return try parseVehicleStatusResponse(data, for: vehicle)
+            return try parseVehicleStatusResponse(data, for: vehicle)
+        } catch let error as APIError where error.errorType == .serverError && error.message.contains("HT_533") {
+            // A live (`refresh: true`) status read while the vehicle is
+            // still busy with a previous request — typically the command
+            // we're verifying — answers HTTP 502 with errorSubCode HT_533.
+            // Type it as `.concurrentRequest` so callers can retry quietly
+            // instead of surfacing a raw server error.
+            throw APIError.concurrentRequest(
+                "The vehicle is still processing a previous request. Please wait and try again.",
+                apiName: apiName
+            )
+        }
     }
 
     public func sendCommand(for vehicle: Vehicle, command: VehicleCommand, authToken: AuthToken) async throws {
+        switch command {
+        case .flashLights, .honkAndFlash:
+            throw APIError(message: "Horn/lights command not supported for Hyundai USA", apiName: apiName)
+        default: break
+        }
         let url = commandURL(for: command, vehicle: vehicle)
         let body = commandBody(for: command, vehicle: vehicle)
 
@@ -122,13 +148,18 @@ public final class HyundaiUSAAPIClient: APIClientBase, APIClientProtocol {
             method: .POST,
             headers: authorizedHeaders(authToken: authToken, vehicle: vehicle),
             body: body,
-            requestType: .sendCommand
+            requestType: .sendCommand,
+            vin: vehicle.vin
         )
 
         try parseCommandResponse(data)
     }
 
-    public func fetchEVTripDetails(for vehicle: Vehicle, authToken: AuthToken) async throws -> [EVTripDetail]? {
+    public func optionalFeaturesSupported() -> [OptionalAPIFeature] {
+        [.evTripSummary, .surroundView, .surroundViewCapture]
+    }
+
+    public func fetchEVTripSummary(for vehicle: Vehicle, authToken: AuthToken) async throws -> [EVTripSummary]? {
         var tripHeaders = authorizedHeaders(authToken: authToken, vehicle: vehicle)
         tripHeaders["userId"] = username
         tripHeaders["access_token"] = authToken.accessToken
@@ -137,9 +168,10 @@ public final class HyundaiUSAAPIClient: APIClientBase, APIClientProtocol {
             url: "\(baseURL)/ac/v2/ts/alerts/maintenance/evTripDetails",
             method: .GET,
             headers: tripHeaders,
-            requestType: .fetchEVTripDetails
+            requestType: .fetchEVTripSummary,
+            vin: vehicle.vin
         )
 
-        return try parseEVTripDetailsResponse(data)
+        return try parseEVTripSummaryResponse(data)
     }
 }
