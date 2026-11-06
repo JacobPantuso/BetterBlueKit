@@ -150,6 +150,16 @@ public protocol APIClientProtocol {
 
     /// Fetch only the vehicle's GPS location without a full status refresh.
     func fetchLocationOnly(for vehicle: Vehicle, authToken: AuthToken) async throws -> VehicleStatus.Location
+
+    /// Optional: Search for public charging stations around a coordinate,
+    /// nearest first. Only Hyundai Canada exposes this today; every other
+    /// client throws `.featureNotSupported` via the default implementation.
+    func fetchChargeStations(
+        near coordinate: (latitude: Double, longitude: Double),
+        radiusKm: Int,
+        authToken: AuthToken,
+        for vehicle: Vehicle
+    ) async throws -> [ChargeStationInfo]
 }
 
 // MARK: - MFA Method
@@ -225,6 +235,15 @@ extension APIClientProtocol {
         authToken _: AuthToken
     ) async throws -> SurroundViewCapture {
         capture
+    }
+
+    public func fetchChargeStations(
+        near _: (latitude: Double, longitude: Double),
+        radiusKm _: Int,
+        authToken _: AuthToken,
+        for _: Vehicle
+    ) async throws -> [ChargeStationInfo] {
+        throw APIError.featureNotSupported("Charge station search is not supported for this API", apiName: "APIClient")
     }
 
     public func optionalFeaturesSupported() -> [OptionalAPIFeature] {

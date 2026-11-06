@@ -90,6 +90,33 @@ extension HyundaiCanadaAPIClient {
         return result
     }
 
+    /// Native-app ("SPA") headers for the in-app-charging (`iac/*`) endpoints.
+    /// These query the live charging-vendor network, which (unlike the account
+    /// web-portal endpoints) only answers the native-app identity: `from: SPA`,
+    /// a `brand` header, and the lowercase `accessToken` / `vehicleId` names the
+    /// official app sends. `deviceid` and the Cloudflare cookie are carried too.
+    func iacHeaders(authToken: AuthToken, vehicleId: String) -> [String: String] {
+        var result: [String: String] = [
+            "client_id": clientId,
+            "client_secret": clientSecret,
+            "Host": apiHost,
+            "deviceid": deviceId,
+            "from": "SPA",
+            "brand": brand == .kia ? "K" : "H",
+            "language": "0",
+            "offset": timezoneOffsetHeader,
+            "User-Agent": browserUserAgent,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "accessToken": authToken.accessToken,
+            "vehicleId": vehicleId,
+        ]
+        if let cookie = cloudFlareCookie {
+            result["Cookie"] = cookie
+        }
+        return result
+    }
+
     // MARK: - Cloudflare Cookie
 
     /// Attempts to fetch the Cloudflare `__cf_bm` bot-management cookie by

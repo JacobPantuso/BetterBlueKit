@@ -14,6 +14,7 @@ public enum HTTPRequestType: String, CaseIterable, Codable, Sendable {
     case sendMFA, verifyMFA
     case fetchEVTripSummary, fetchEVTripInfo
     case requestSurroundView, fetchSurroundView
+    case fetchChargeStations
 
     /// Logs are persisted with the raw value, so renaming a case orphans
     /// existing rows: decoding "fetchEVTripDetails" (the pre-rename name of
@@ -45,6 +46,7 @@ public enum HTTPRequestType: String, CaseIterable, Codable, Sendable {
         case .fetchEVTripInfo: "Fetch Trip Info"
         case .requestSurroundView: "Request Surround View"
         case .fetchSurroundView: "Fetch Surround View"
+        case .fetchChargeStations: "Fetch Charge Stations"
         }
     }
 }

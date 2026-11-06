@@ -56,7 +56,9 @@ extension APIClientBase {
     /// `_check_response_for_errors`, which is the reference implementation for
     /// the European Hyundai/Kia API.
     func checkCCSPResponseForErrors(data: Data) throws {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        // CCSP error envelopes are tiny; skip the full parse for large data payloads.
+        guard data.count <= 64 * 1024,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               json["retCode"] as? String == "F",
               let resCode = json["resCode"] as? String else {
             return

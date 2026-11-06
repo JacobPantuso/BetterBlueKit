@@ -389,6 +389,12 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
                     useRemoteControl: false
                 )
                 return
+            } catch let error as APIError where error.errorType == .concurrentRequest {
+                // 6533 "processing an earlier inquiry" is about the car, not the
+                // body format. Falling back here sent a second request into the
+                // busy window, which came back 6452 and hid the busy error, so
+                // the app reported a failure instead of queuing a retry (#42).
+                throw error
             } catch {
                 try await sendCommandRequest(
                     for: vehicle,
@@ -476,7 +482,7 @@ public final class HyundaiCanadaAPIClient: APIClientBase, APIClientProtocol {
         )
     }
 
-    private func ensureCloudFlareCookie() async throws -> String? {
+    func ensureCloudFlareCookie() async throws -> String? {
         if let cloudFlareCookie, !cloudFlareCookie.isEmpty {
             return cloudFlareCookie
         }

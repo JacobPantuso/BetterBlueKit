@@ -145,7 +145,7 @@ open class APIClientBase {
 
         let responseHeaders = extractResponseHeaders(from: httpResponse)
         let responseBody = String(data: data, encoding: .utf8)
-        let apiError = extractAPIError(from: data)
+        let apiError = Self.extractAPIError(from: data)
 
         BBLogger.debug(.api, "[\(apiName)] Response \(httpResponse.statusCode) for \(context.requestType.displayName)")
 
@@ -179,7 +179,7 @@ open class APIClientBase {
         let vin: String?
     }
 
-    struct HTTPRequestLogData {
+    struct HTTPRequestLogData: Sendable {
         let requestType: HTTPRequestType
         let request: URLRequest
         let requestHeaders: [String: String]
@@ -194,61 +194,66 @@ open class APIClientBase {
     }
 
     func logHTTPRequest(_ logData: HTTPRequestLogData) {
+        guard let sink = logSink else { return }
         let duration = Date().timeIntervalSince(logData.startTime)
         let method = logData.request.httpMethod ?? "GET"
         let rawURL = logData.request.url?.absoluteString ?? "Unknown URL"
-        // Request URLs can carry credentials too (e.g. the EU CCI token
-        // exchange's `?code=…`), so they go through the same redaction as
-        // bodies.
-        let url = configuration.redactPII
-            ? (SensitiveDataRedactor.redact(rawURL) ?? rawURL)
-            : rawURL
-        let stackTrace = captureStackTrace()
+        let redact = configuration.redactPII
+        let accountId = accountId
 
-        // Apply redaction unless disabled
-        let requestHeaders: [String: String]
-        let requestBody: String?
-        let responseHeaders: [String: String]
-        let responseBody: String?
+        // Elision and redaction run over whole response bodies (17 regex
+        // passes), so they happen off the main actor on value copies. The
+        // sink is only called with the finished, redacted log — nothing
+        // unredacted ever reaches it. The stack trace is no longer captured:
+        // nothing in the app, CLI or troubleshooting export reads it, and
+        // symbolicating on the main actor per request was pure cost.
+        Task.detached(priority: .utility) {
+            // Request URLs can carry credentials too (e.g. the EU CCI token
+            // exchange's `?code=…`), so they go through the same redaction.
+            let url = redact ? (SensitiveDataRedactor.redact(rawURL) ?? rawURL) : rawURL
 
-        // Oversized values go first, and regardless of the redaction
-        // setting: a surround-view response is megabytes of base64 JPEG,
-        // which would bloat the persisted log (and every debug export)
-        // and drag the redaction regexes across the whole payload.
-        let sizedRequestBody = SensitiveDataRedactor.elideOversizedValues(logData.requestBody)
-        let sizedResponseBody = SensitiveDataRedactor.elideOversizedValues(logData.responseBody)
+            // Oversized values go first, and regardless of the redaction
+            // setting: a surround-view response is megabytes of base64 JPEG,
+            // which would bloat the persisted log (and every debug export)
+            // and drag the redaction regexes across the whole payload.
+            let sizedRequestBody = SensitiveDataRedactor.elideOversizedValues(logData.requestBody)
+            let sizedResponseBody = SensitiveDataRedactor.elideOversizedValues(logData.responseBody)
 
-        if configuration.redactPII {
-            requestHeaders = redactSensitiveHeaders(logData.requestHeaders)
-            requestBody = redactSensitiveData(in: sizedRequestBody)
-            responseHeaders = redactSensitiveHeaders(logData.responseHeaders)
-            responseBody = redactSensitiveData(in: sizedResponseBody)
-        } else {
-            requestHeaders = logData.requestHeaders
-            requestBody = sizedRequestBody
-            responseHeaders = logData.responseHeaders
-            responseBody = sizedResponseBody
+            let requestHeaders: [String: String]
+            let requestBody: String?
+            let responseHeaders: [String: String]
+            let responseBody: String?
+            if redact {
+                requestHeaders = SensitiveDataRedactor.redactHeaders(logData.requestHeaders)
+                requestBody = SensitiveDataRedactor.redact(sizedRequestBody)
+                responseHeaders = SensitiveDataRedactor.redactHeaders(logData.responseHeaders)
+                responseBody = SensitiveDataRedactor.redact(sizedResponseBody)
+            } else {
+                requestHeaders = logData.requestHeaders
+                requestBody = sizedRequestBody
+                responseHeaders = logData.responseHeaders
+                responseBody = sizedResponseBody
+            }
+
+            let httpLog = HTTPLog(
+                timestamp: logData.startTime,
+                accountId: accountId,
+                requestType: logData.requestType,
+                method: method,
+                url: url,
+                requestHeaders: requestHeaders,
+                requestBody: requestBody,
+                responseStatus: logData.responseStatus,
+                responseHeaders: responseHeaders,
+                responseBody: responseBody,
+                error: logData.error,
+                apiError: logData.apiError,
+                duration: duration,
+                stackTrace: nil,
+                vin: logData.vin
+            )
+            await MainActor.run { sink(httpLog) }
         }
-
-        let httpLog = HTTPLog(
-            timestamp: logData.startTime,
-            accountId: accountId,
-            requestType: logData.requestType,
-            method: method,
-            url: url,
-            requestHeaders: requestHeaders,
-            requestBody: requestBody,
-            responseStatus: logData.responseStatus,
-            responseHeaders: responseHeaders,
-            responseBody: responseBody,
-            error: logData.error,
-            apiError: logData.apiError,
-            duration: duration,
-            stackTrace: stackTrace,
-            vin: logData.vin
-        )
-
-        logSink?(httpLog)
     }
 
     func createErrorLogData(context: RequestContext, error: String) -> HTTPRequestLogData {
@@ -275,8 +280,10 @@ open class APIClientBase {
         }
     }
 
-    func extractAPIError(from data: Data?) -> String? {
-        guard let data,
+    nonisolated static func extractAPIError(from data: Data?) -> String? {
+        // Bluelink error bodies are tiny. Anything over 64 KB is a data
+        // payload (e.g. a station list), so skip the full JSON parse.
+        guard let data, data.count <= 64 * 1024,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
