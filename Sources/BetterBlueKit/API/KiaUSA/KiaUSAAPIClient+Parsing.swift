@@ -10,6 +10,11 @@ import Foundation
 // MARK: - Response Parsing
 
 extension KiaUSAAPIClient {
+    /// A response header by name, ignoring case: HTTP header names are
+    /// case-insensitive, and Kia's arrive in more than one casing.
+    func header(_ name: String, in headers: [String: String]) -> String? {
+        headers.first { $0.key.caseInsensitiveCompare(name) == .orderedSame }?.value
+    }
 
     func parseLoginResponse(_ data: Data, headers: [String: String]) throws -> AuthToken {
         try checkForKiaErrors(data: data)
@@ -22,7 +27,7 @@ extension KiaUSAAPIClient {
         // Check for MFA requirement
         if let payload = json["payload"] as? [String: Any],
            let otpKey = payload["otpKey"] as? String {
-            let xid = headers["xid"] ?? headers["Xid"] ?? headers["XID"] ?? ""
+            let xid = header("xid", in: headers) ?? ""
             let hasEmail = payload["hasEmail"] as? Bool ?? false
             let hasPhone = payload["hasPhone"] as? Bool ?? false
             let email = payload["email"] as? String
@@ -48,7 +53,7 @@ extension KiaUSAAPIClient {
             )
         }
 
-        let sid = headers["sid"] ?? headers["Sid"] ?? headers["SID"]
+        let sid = header("sid", in: headers)
         guard let sessionId = sid else {
             throw APIError.logError("Login response missing session ID header", apiName: apiName)
         }
@@ -66,7 +71,7 @@ extension KiaUSAAPIClient {
         // observed to rotate this on every successful `authUser`, but
         // the cost of capturing is tiny and it's the kind of bug that
         // would otherwise look indistinguishable from a flaky session.
-        let rotatedRmToken = headers["rmToken"] ?? headers["rmtoken"] ?? headers["RmToken"]
+        let rotatedRmToken = header("rmtoken", in: headers)
         if let rotatedRmToken {
             BBLogger.info(.auth, "KiaUSA: authUser response carried an updated rmToken — rotating cache")
             configuration.onRememberMeTokenRotated?(rotatedRmToken)

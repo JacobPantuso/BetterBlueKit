@@ -179,9 +179,26 @@ public final class KiaUSAAPIClient: APIClientBase, APIClientProtocol {
 
         try checkForKiaErrors(data: data)
 
+        // A wrong or expired code comes back as a non-zero statusCode with no
+        // tokens, under error codes checkForKiaErrors doesn't classify. The
+        // Python reference treats any non-zero statusCode here as a failure.
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let status = json["status"] as? [String: Any],
+           let statusCode: Int = extractNumber(from: status["statusCode"]), statusCode != 0 {
+            let serverMessage = status["errorMessage"] as? String ?? ""
+            BBLogger.warning(.mfa, "KiaUSA verifyOTP rejected: statusCode \(statusCode) \(serverMessage)")
+            throw APIError.logError(
+                "That code didn't work. Check it and try again, or send a new code.",
+                apiName: apiName,
+                errorType: .invalidCredentials
+            )
+        }
+
+        // Header names are case-insensitive, and Kia's don't always arrive in
+        // the casing we'd guess.
         let responseHeaders = extractResponseHeaders(from: response)
-        guard let rmToken = responseHeaders["rmToken"] ?? responseHeaders["rmtoken"] ?? responseHeaders["RmToken"],
-              let sessionId = responseHeaders["sid"] ?? responseHeaders["Sid"] ?? responseHeaders["SID"] else {
+        guard let rmToken = header("rmtoken", in: responseHeaders),
+              let sessionId = header("sid", in: responseHeaders) else {
             BBLogger.warning(.mfa, "KiaUSA verifyOTP response headers: \(responseHeaders)")
             throw APIError.logError("Verify OTP response missing tokens", apiName: apiName)
         }
